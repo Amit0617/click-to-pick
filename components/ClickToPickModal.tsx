@@ -348,13 +348,25 @@ export function ClickToPickModal({
                   <circle
                     cx={pt.x}
                     cy={pt.y}
-                    r="22"
-                    fill="rgba(79, 70, 229, 0.25)"
+                    r="12"
+                    fill="rgba(79, 70, 229, 0.2)"
                     stroke="#4f46e5"
                     strokeWidth="2"
                     vectorEffect="non-scaling-stroke"
-                    className="animate-ping"
-                  />
+                  >
+                    <animate
+                      attributeName="r"
+                      values="12;28"
+                      dur="1.5s"
+                      repeatCount="indefinite"
+                    />
+                    <animate
+                      attributeName="opacity"
+                      values="1;0"
+                      dur="1.5s"
+                      repeatCount="indefinite"
+                    />
+                  </circle>
                   {/* Inner targeting reticle */}
                   <circle
                     cx={pt.x}
@@ -429,6 +441,28 @@ export function ClickToPickModal({
                       rx="6"
                     />
                     {/* Center grasp point indicator */}
+                    <circle
+                      cx={centerX}
+                      cy={centerY}
+                      r="6"
+                      fill="rgba(79, 70, 229, 0.25)"
+                      stroke="#4f46e5"
+                      strokeWidth="1.5"
+                      vectorEffect="non-scaling-stroke"
+                    >
+                      <animate
+                        attributeName="r"
+                        values="6;18"
+                        dur="1.5s"
+                        repeatCount="indefinite"
+                      />
+                      <animate
+                        attributeName="opacity"
+                        values="1;0"
+                        dur="1.5s"
+                        repeatCount="indefinite"
+                      />
+                    </circle>
                     <circle
                       cx={centerX}
                       cy={centerY}
