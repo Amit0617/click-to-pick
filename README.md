@@ -6,7 +6,7 @@
 
 This contains everything you need to run your app locally.
 
-View your app in AI Studio: https://ai.studio/apps/bundled/robotics_franka_pick_and_place
+View your app in AI Studio: https://ai.studio/apps/2dfef720-ed29-44b6-a6dc-7940694b09f5
 
 ## Run Locally
 

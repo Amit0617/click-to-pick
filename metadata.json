@@ -1,6 +1,6 @@
 {
-  "name": "Robotics Pick and Place",
-  "description": "Simulated Franka Panda executing Pick and Place using Gemini Robotics ER.",
+  "name": "Robotics Click to Pick",
+  "description": "Simulated Franka Panda Picking items as chosen by user",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }

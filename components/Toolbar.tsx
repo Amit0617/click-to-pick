@@ -4,7 +4,7 @@
 */
 
 
-import { Moon, PanelRight, Pause, Play, RotateCcw, Sun } from 'lucide-react';
+import { Crosshair, Moon, PanelRight, Pause, Play, RotateCcw, Sun } from 'lucide-react';
 
 interface ToolbarProps {
   isPaused: boolean; 
@@ -14,6 +14,8 @@ interface ToolbarProps {
   toggleSidebar: () => void;
   isDarkMode: boolean;
   toggleDarkMode: () => void;
+  onClickToPick?: () => void;
+  isClickToPickActive?: boolean;
 }
 
 /**
@@ -27,7 +29,9 @@ export function Toolbar({
   showSidebar,
   toggleSidebar,
   isDarkMode,
-  toggleDarkMode
+  toggleDarkMode,
+  onClickToPick,
+  isClickToPickActive = false
 }: ToolbarProps) {
   const panelStyle = isDarkMode ? "bg-slate-900/80 border-white/10 text-slate-100" : "bg-white/70 border-white/80 text-slate-800";
   const iconFill = isDarkMode ? "fill-slate-100" : "fill-slate-800";
@@ -52,6 +56,17 @@ export function Toolbar({
       >
         <RotateCcw className="w-6 h-6" />
       </button>
+
+      {/* Click to Pick Button */}
+      {onClickToPick && (
+        <button 
+          onClick={onClickToPick} 
+          className={`w-14 h-14 rounded-2xl glass-panel flex items-center justify-center transition-all hover:scale-105 active:scale-95 shadow-xl ${isClickToPickActive ? (isDarkMode ? 'text-indigo-400 bg-slate-800 ring-2 ring-indigo-500/50' : 'text-indigo-600 bg-white ring-2 ring-indigo-500/50') : panelStyle}`}
+          title="Click to Pick (Direct Visual Target Selection)"
+        >
+          <Crosshair className={`w-6 h-6 ${isClickToPickActive ? 'text-indigo-500 animate-pulse' : 'text-indigo-500'}`} />
+        </button>
+      )}
 
       {/* Dark Mode Toggle */}
       <button 

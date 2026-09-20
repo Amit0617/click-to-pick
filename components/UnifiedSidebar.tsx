@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 
-import { BoxSelect, ChevronDown, FastForward, Grab, History, Info, Loader2, MousePointer2, RotateCcw, Send, Settings2, Thermometer, X } from 'lucide-react';
+import { BoxSelect, ChevronDown, Crosshair, FastForward, Grab, History, Info, Loader2, MousePointer2, RotateCcw, Send, Settings2, Thermometer, X } from 'lucide-react';
 import { useState } from 'react';
 import { LogOverlay } from '../App';
 import { DetectedItem, DetectType, LogEntry } from '../types';
@@ -13,6 +13,7 @@ interface UnifiedSidebarProps {
   onClose: () => void;
   onSend: (prompt: string, type: DetectType, temperature: number, enableThinking: boolean, modelId: string) => void;
   onPickup: () => void;
+  onClickToPick?: () => void;
   isLoading: boolean;
   hasDetectedItems: boolean;
   logs: LogEntry[];
@@ -31,6 +32,7 @@ export function UnifiedSidebar({
   onClose, 
   onSend, 
   onPickup, 
+  onClickToPick,
   isLoading, 
   hasDetectedItems, 
   logs, 
@@ -218,6 +220,24 @@ export function UnifiedSidebar({
                 )}
             </button>
           </div>
+
+          {onClickToPick && (
+            <button 
+                onClick={onClickToPick}
+                disabled={isLoading || isPickingUp}
+                title="Click to Pick: Take a top-down snapshot and click directly on objects to pick"
+                className={`w-full py-3.5 rounded-2xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all border shadow-sm active:scale-[0.98] ${
+                  isLoading || isPickingUp
+                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed dark:bg-slate-800 dark:text-slate-600 border-transparent'
+                    : isDarkMode 
+                      ? 'bg-indigo-600/15 border-indigo-500/30 text-indigo-300 hover:bg-indigo-600/25' 
+                      : 'bg-indigo-50/80 border-indigo-200 text-indigo-700 hover:bg-indigo-100 shadow-indigo-100/50'
+                }`}
+            >
+                <Crosshair className="w-4 h-4 text-indigo-500" />
+                <span>Click to Pick (Direct Selection)</span>
+            </button>
+          )}
         </section>
 
         {/* History / Logs Section */}

@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
 import { MujocoSim } from './MujocoSim';
+import { ClickToPickModal } from './components/ClickToPickModal';
 import { RobotSelector } from './components/RobotSelector';
 import { Toolbar } from './components/Toolbar';
 import { UnifiedSidebar } from './components/UnifiedSidebar';
@@ -74,6 +75,13 @@ export function LogOverlay({ log }: LogOverlayProps) {
   );
 }
 
+interface ClickToPickData {
+  imageSrc: string;
+  savedState: { position: THREE.Vector3; target: THREE.Vector3 };
+  topPos: THREE.Vector3;
+  target: THREE.Vector3;
+}
+
 /**
  * Main Application Component
  */
@@ -94,6 +102,7 @@ export function App() {
   const [isDarkMode, setIsDarkMode] = useState(false);
   
   const [erLoading, setErLoading] = useState(false);
+  const [clickToPickData, setClickToPickData] = useState<ClickToPickData | null>(null);
   const [logs, setLogs] = useState<Array<LogEntry>>([]);
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [flash, setFlash] = useState(false); 
@@ -364,6 +373,113 @@ export function App() {
       }
   };
 
+  const handleClickToPick = async () => {
+    if (!simRef.current || erLoading || isPickingUp) return;
+    setErLoading(true);
+    simRef.current.renderSys.clearErMarkers();
+    detectedTargets.current = [];
+    setDetectedCount(0);
+    setIsPickingUp(false);
+    setPlaybackSpeed(1);
+
+    const savedState = simRef.current.renderSys.getCameraState();
+    const topPos = new THREE.Vector3(0, -0.01, 2.0);
+    const target = new THREE.Vector3(0, 0, 0);
+
+    // Transition view to top-down
+    await simRef.current.renderSys.moveCameraTo(topPos, target, 1500);
+    await new Promise(r => setTimeout(r, 100));
+
+    // Snapshot flash effect
+    setFlash(true);
+    setTimeout(() => setFlash(false), 100);
+
+    // Take snapshot of current canvas
+    const canvas = simRef.current.renderSys.renderer.domElement;
+    const width = canvas.width;
+    const height = canvas.height;
+    const scaleFactor = Math.min(640 / width, 640 / height);
+    const snapshotWidth = Math.floor(width * scaleFactor);
+    const snapshotHeight = Math.floor(height * scaleFactor);
+
+    const imageBase64 = simRef.current.renderSys.getCanvasSnapshot(snapshotWidth, snapshotHeight, 'image/png');
+
+    setErLoading(false);
+    setClickToPickData({
+      imageSrc: imageBase64,
+      savedState,
+      topPos,
+      target
+    });
+  };
+
+  const handleConfirmClickToPick = async (points: Array<{x: number, y: number}>, autoPickup = false) => {
+    if (!simRef.current || !clickToPickData) return;
+    const { imageSrc, savedState, topPos, target } = clickToPickData;
+    setClickToPickData(null);
+    setErLoading(true);
+
+    // Restore camera to original position
+    await simRef.current.renderSys.moveCameraTo(savedState.position, savedState.target, 1500);
+
+    const logId = uuidv4();
+    const detectedItems: DetectedItem[] = [];
+
+    // Process each clicked point through project2DTo3D exactly like prompt responses
+    points.forEach((pt, index) => {
+      const projection = simRef.current?.renderSys.project2DTo3D(pt.x, pt.y, topPos, target);
+      if (projection) {
+        const markerId = Date.now() + index + Math.random();
+        const label = points.length > 1 ? `Target ${index + 1}` : "Target";
+        simRef.current?.renderSys.addErMarker(projection.point, label, markerId);
+        detectedTargets.current.push({ pos: projection.point, markerId });
+        detectedItems.push({
+          point: [pt.y, pt.x],
+          label
+        });
+      }
+    });
+
+    setDetectedCount(detectedTargets.current.length);
+
+    // Record entry in call history
+    const newLog: LogEntry = {
+      id: logId,
+      timestamp: new Date(),
+      imageSrc,
+      prompt: "Click to Pick",
+      fullPrompt: `Direct coordinate click: ${points.map(p => `[x:${p.x}, y:${p.y}]`).join(', ')}`,
+      type: "Points",
+      result: detectedItems.length > 0 ? detectedItems : [{ error: "No 3D object at clicked coordinate" }],
+      requestData: {
+        model: "Click to Pick (Direct)",
+        contents: {
+          parts: [
+            { inlineData: { data: "<IMAGE>", mimeType: "image/png" } },
+            { text: `Direct coordinates captured: ${JSON.stringify(points)}` }
+          ]
+        },
+        config: {}
+      }
+    };
+    setLogs(prev => [newLog, ...prev]);
+    setErLoading(false);
+
+    if (autoPickup && detectedTargets.current.length > 0) {
+      handlePickup();
+    }
+  };
+
+  const handleCancelClickToPick = async () => {
+    if (!simRef.current || !clickToPickData) {
+      setClickToPickData(null);
+      return;
+    }
+    const { savedState } = clickToPickData;
+    setClickToPickData(null);
+    await simRef.current.renderSys.moveCameraTo(savedState.position, savedState.target, 1500);
+  };
+
   const handlePickup = () => {
     if (simRef.current) {
         // If already picking up, this button acts as a speed toggle
@@ -475,6 +591,8 @@ export function App() {
             toggleSidebar={() => setShowSidebar(!showSidebar)}
             isDarkMode={isDarkMode}
             toggleDarkMode={toggleDarkMode}
+            onClickToPick={handleClickToPick}
+            isClickToPickActive={Boolean(clickToPickData || erLoading)}
           />
           
           <UnifiedSidebar 
@@ -482,6 +600,7 @@ export function App() {
             onClose={() => setShowSidebar(false)}
             onSend={handleErSend}
             onPickup={handlePickup}
+            onClickToPick={handleClickToPick}
             isLoading={erLoading}
             hasDetectedItems={detectedCount > 0}
             logs={logs}
@@ -490,6 +609,16 @@ export function App() {
             isPickingUp={isPickingUp}
             playbackSpeed={playbackSpeed}
           />
+
+          {/* Click to Pick Interactive Snapshot Modal */}
+          {clickToPickData && (
+            <ClickToPickModal
+              imageSrc={clickToPickData.imageSrc}
+              isDarkMode={isDarkMode}
+              onConfirm={handleConfirmClickToPick}
+              onCancel={handleCancelClickToPick}
+            />
+          )}
 
           {/* Expanded View Modal - Overlay everything */}
           {activeLog && (
