@@ -563,12 +563,13 @@ export function App() {
                   <div className={`glass-panel p-12 rounded-[3rem] flex-1 flex flex-col justify-center shadow-2xl transition-colors ${isDarkMode ? 'bg-slate-900/70 border-white/10' : 'bg-white/70 border-white/80'}`}>
                     <h3 className={`text-sm font-bold uppercase tracking-widest mb-4 ${isDarkMode ? 'text-indigo-400' : 'text-indigo-600'}`}>System Overview</h3>
                     <p className={`text-sm leading-relaxed mb-6 ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                      This demo showcases spatial reasoning for robotics. Using <strong>Gemini Robotics Embodied Reasoning 2.0</strong>, the system analyzes a 2D image to identify objects and calculate manipulation coordinates.
+                      This demo showcases spatial perception and robotic manipulation in the browser. Target objects using <strong>Gemini Embodied Reasoning</strong> or directly via <strong>Click to Pick</strong> to calculate manipulation coordinates for the Franka Emika Panda arm.
                     </p>
                     <ul className={`text-[13px] space-y-3 list-disc list-inside ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                        <li>Real-time MuJoCo physics simulation</li>
-                        <li>Analytical Inverse Kinematics for Franka Panda</li>
-                        <li>Call Gemini Robotics Embodied Reasoning 2.0 for detection</li>
+                        <li>Real-time MuJoCo physics simulation in WebAssembly</li>
+                        <li>Analytical Inverse Kinematics (IK) for Franka Panda 7-DOF</li>
+                        <li>Gemini Embodied Reasoning (points & bounding boxes)</li>
+                        <li>Click to Pick for direct visual targeting and pickup</li>
                     </ul>
                   </div>
 

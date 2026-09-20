@@ -1,86 +1,81 @@
-# Franka Panda | Pick and Place with Gemini - Codebase Documentation
+# Franka Panda | Robotics Simulator & Pick and Place - Codebase Documentation
 
-This project demonstrates an Embodied Reasoning loop where a Google Gemini Vision
-model analyzes a 3D robotic scene to guide a Franka Emika Panda robot in picking
-up objects. The application combines React for the UI, Three.js for rendering,
-and MuJoCo (via WASM) for physics simulation.
+This project demonstrates both an **Embodied Reasoning AI loop** (via Google Gemini Vision models) and a direct **Click to Pick manual visual targeting mode** to guide a Franka Emika Panda 7-DOF robotic arm in picking up objects. The application combines React for the UI, Three.js for rendering, and MuJoCo (via WebAssembly) for physics simulation.
 
-## System Architecture
+---
 
-1.  **Frontend (React)**: Handles the user interface, captures simulation state (images), communicates with the Gemini API, and visualizes logs.
-2.  **Visualization (Three.js)**: Renders the robot, objects, and environment. It synchronizes with the physics engine frame-by-frame.
-3.  **Physics (MuJoCo WASM)**: Runs the robotic simulation, collision detection, and inverse kinematics (IK) target tracking.
-4.  **AI (Gemini API)**: Receives a 2D snapshot of the scene and a text prompt, returning 2D bounding boxes or keypoints which are projected back into 3D space for the robot.
+## Systems Overview
+
+1. **Frontend & Control Interface (React)**:
+   - Manages simulation states, user interactions, targeting mode selection, camera transitions, and visual interaction logs.
+   - Provides two targeting modes:
+     - **Click to Pick (Manual Visual)**: Captures a clean top-down orthographic snapshot of the table where users click exact points or draw bounding boxes with SVG targeting reticles.
+     - **Gemini Embodied Reasoning (AI)**: Sends prompts and snapshots to Gemini models (`gemini-robotics-er-2-preview`, `gemini-2.5-flash`) for automated semantic detection.
+   - Displays **Picked Items History** with statuses (`Targeted` vs `Picked`), timestamps, and modal detail views.
+
+2. **Visualization & Scene Projection (Three.js)**:
+   - Renders the Franka Panda robot arm, colored blocks, table, trays, and floor reflections.
+   - Synchronizes every frame with MuJoCo physics state (`mjData`).
+   - Translates 2D canvas pixel coordinates $(x, y)$ into 3D world space coordinates via raycasting (`project2DTo3D`).
+
+3. **Physics Simulation (MuJoCo WebAssembly)**:
+   - Runs `mujoco-js` compiled to WebAssembly directly inside the browser.
+   - Loads the Franka Emika Panda MJCF model and assets from the DeepMind Menagerie.
+   - Performs rigid-body collision detection, contact dynamics, gravity, and actuator dynamics.
+
+4. **Kinematics & Motion Control**:
+   - **Inverse Kinematics (`FrankaAnalyticalIK.ts`)**: Closed-form analytical inverse kinematics solver specialized for the Franka Emika Panda 7-DOF arm.
+   - **IK Management (`IkSystem.ts`)**: Applies joint limits, resolves redundancy, and feeds computed joint angles into the simulation.
+   - **Trajectory Execution (`SequenceAnimator.ts`)**: Orchestrates the multi-stage pick-and-place sequence:
+     1. Move to pre-grasp hover position above target.
+     2. Open two-finger parallel gripper.
+     3. Lower to grasp position.
+     4. Close gripper to grasp target.
+     5. Lift object vertically.
+     6. Move to sorting tray drop zone.
+     7. Open gripper to release object.
+     8. Return to ready home position.
 
 ---
 
 ## File Structure & Responsibilities
 
 ### Core Application
-
-- **`index.tsx`**: Application entry point. Mounts the React root.
-- **`App.tsx`**: The main controller component.
-    -   Initializes the `MujocoSim`.
-    -   Manages application state (loading, dark mode, logs).
-    -   Handles the "Sense-Plan-Act" loop:
-        1.  Captures canvas snapshot.
-        2.  Sends request to Gemini (`handleErSend`).
-        3.  Parses JSON response.
-        4.  Projects 2D detections to 3D coordinates.
-        5.  Commands the robot to pickup (`handlePickup`).
-- **`types.ts`**: Shared TypeScript definitions (e.g., `LogEntry`, `DetectType`).
+- **`index.tsx`**: Application bootstrap and React DOM root mounting.
+- **`App.tsx`**: Main controller component.
+  - Initializes `MujocoSim`.
+  - Manages targeting modes, logs, and camera states.
+  - Handles the dual targeting pipeline:
+    - AI flow: `handleErSend`
+    - Visual click flow: `handleClickToPick` and `handleConfirmClickToPick`
+  - Dispatches pickup commands via `handlePickup`.
+- **`types.ts`**: TypeScript definitions (`LogEntry`, `DetectedItem`, `DetectType`, etc.).
 
 ### Simulation Engine
+- **`MujocoSim.ts`**: Central orchestrator.
+  - Initializes the robot and environment model (`init`).
+  - Executes physics stepping and render synchronization loop (`startLoop`).
+  - Manages item picking state and speed multipliers (`pickupItems`, `setSpeedMultiplier`).
+- **`RenderSystem.ts`**: Three.js scene graph manager.
+  - Mesh creation from MuJoCo geoms (`GeomBuilder`).
+  - Camera control and dynamic view transitions (`moveCameraTo`).
+  - 2D-to-3D back-projection (`project2DTo3D`).
+- **`RobotLoader.ts`**: Downloads and mounts MJCF XML models and textures into MuJoCo's in-memory virtual filesystem.
 
-- **`MujocoSim.ts`**: The central orchestrator.
-    -   Loads the robot model XML (`init`).
-    -   Runs the main simulation loop (`startLoop`).
-    -   Syncs physics state (`mjData`) to graphics (`RenderSystem`).
-    -   Manages the sequence of actions for picking up items (`pickupItems`).
-- **`RenderSystem.ts`**: Manages the Three.js scene graph.
-    -   Creates meshes from MuJoCo geoms (`GeomBuilder`).
-    -   Handles lighting, shadows, and camera controls.
-    -   Provides `project2DTo3D` to convert AI vision results into world coordinates.
-- **`RobotLoader.ts`**: Fetches MJCF (XML) files and assets from remote repositories (DeepMind Menagerie) and writes them to the in-memory WASM filesystem.
+### Robotics & Kinematics
+- **`IkSystem.ts`**: Coordinates target end-effector poses and joint configurations.
+- **`FrankaAnalyticalIK.ts`**: Analytical geometric inverse kinematics solver for the 7-DOF Franka Panda.
+- **`SequenceAnimator.ts`**: State machine orchestrating pick-and-place trajectory interpolation.
 
-### Robotics & Control
-
-- **`IkSystem.ts`**: Manages Inverse Kinematics targets.
-    -   Uses `FrankaAnalyticalIK` to solve joint angles for a desired end-effector pose.
-    -   Handles redundancy resolution for the 7-DOF arm.
-- **`FrankaAnalyticalIK.ts`**: An analytical geometry-based IK solver specifically for the Franka Emika Panda.
-- **`SequenceAnimator.ts`**: A state machine that drives the robot through pick-and-place phases (Hover -> Open -> Lower -> Grasp -> Lift -> Move -> Drop).
-    -   Interpolates joint angles for smooth motion.
-
-### Interaction & Utils
-
-- **`DragStateManager.ts`**: Handles mouse interaction raycasting (configured here for read-only cursor tracking as manipulation is disabled).
-- **`SelectionManager.ts`**: Handles double-click object highlighting.
-- **`utils/StringUtils.ts`**: Decodes C++ null-terminated strings from MuJoCo's WASM memory.
-- **`rendering/GeomBuilder.ts`**: Factory that converts MuJoCo collision shapes (Box, Sphere, Mesh, etc.) into Three.js Geometry.
-- **`Reflector.ts`**: A custom Three.js mesh for the reflective floor plane.
-- **`CapsuleGeometry.ts`**: Custom geometry for MuJoCo's capsule primitives.
-- **`MatMath.ts`**: Lightweight linear algebra helpers.
-
-### UI Components
-
-- **`components/UnifiedSidebar.tsx`**: The main control panel. Contains the Prompt input, Detection Type selector, and Interaction History list.
-- **`components/Toolbar.tsx`**: Bottom-left floating controls for Play/Pause, Reset, Dark Mode, and Sidebar toggle.
-- **`components/RobotSelector.tsx`**: Top-left overlay displaying robot status and coordinates.
-
----
-
-## How It Works: The AI Loop
-
-1.  **User Prompt**: User types "red cubes" and selects "Segmentation masks" in the Sidebar.
-2.  **Capture**: `App.tsx` calls `sim.renderSys.getCanvasSnapshot()` to get a base64 JPEG of the current 3D view.
-3.  **Inference**: A request is sent to `gemini-robotics-er-2-preview` with the image and prompt.
-4.  **Response**: Gemini returns a JSON list of detected objects with 2D bounding boxes/masks.
-5.  **Projection**:
-    -   The app calculates the center `(x, y)` of the box in the 2D image.
-    -   `RenderSystem.ts` casts a ray from the camera through that pixel into the 3D scene (`project2DTo3D`).
-    -   The intersection point on the table/object becomes the 3D target.
-6.  **Action**:
-    -   `App.tsx` passes these 3D points to `MujocoSim`.
-    -   `MujocoSim` initiates `SequenceAnimator`.
-    -   `SequenceAnimator` calculates the path and drives the robot joints using `IkSystem` to pick up the object and place it in the tray.
+### Interaction & UI Components
+- **`components/UnifiedSidebar.tsx`**: Primary interaction panel with mode dropdown (`Click to Pick`, `Gemini Robotics ER`, `Gemini 2.5 Flash`), format toggles (`Points` vs `Bounding Boxes`), and **Picked Items History**.
+- **`components/ClickToPickModal.tsx`**: Interactive snapshot modal for manual point placement and bounding box drawing with animated SVG reticles.
+- **`components/Toolbar.tsx`**: Floating controls for play/pause, reset, dark mode, and sidebar toggle.
+- **`components/RobotSelector.tsx`**: Robot status display and coordinates.
+- **`DragStateManager.ts`**: Mouse raycasting state manager.
+- **`SelectionManager.ts`**: Double-click object selection and highlighting.
+- **`rendering/GeomBuilder.ts`**: Factory mapping MuJoCo primitives (boxes, cylinders, spheres, capsules, meshes) into Three.js geometries.
+- **`Reflector.ts`**: Mirror floor reflection rendering.
+- **`CapsuleGeometry.ts`**: Custom Three.js geometry for capsule colliders.
+- **`MatMath.ts`**: Matrix and vector math helpers.
+- **`utils/StringUtils.ts`**: C++ null-terminated string decoder for WASM memory.
