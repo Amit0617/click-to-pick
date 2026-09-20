@@ -10,7 +10,7 @@
 export type DetectType = '2D bounding boxes' | 'Points';
 
 /**
- * LogEntry represents a record of a vision model interaction.
+ * LogEntry represents a record of a vision or click-to-pick interaction.
  */
 export interface LogEntry {
   id: string;
@@ -18,7 +18,10 @@ export interface LogEntry {
   imageSrc: string;
   prompt: string;
   fullPrompt: string;
-  type: string;
+  type: string; // '2D bounding boxes' | 'Points'
+  mode?: 'click-to-pick' | 'gemini';
+  status?: 'targeted' | 'picked' | 'failed';
+  pickedAt?: Date;
   result: unknown; 
   requestData: unknown; 
 }

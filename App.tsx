@@ -80,6 +80,7 @@ interface ClickToPickData {
   savedState: { position: THREE.Vector3; target: THREE.Vector3 };
   topPos: THREE.Vector3;
   target: THREE.Vector3;
+  type: DetectType;
 }
 
 /**
@@ -294,6 +295,8 @@ export function App() {
           prompt,
           fullPrompt: textPrompt,
           type,
+          mode: 'gemini',
+          status: 'targeted',
           result: null, 
           requestData: requestLogData
       };
@@ -339,7 +342,7 @@ export function App() {
               });
           }
 
-          setLogs(prev => prev.map(l => l.id === logId ? { ...l, result } : l));
+          setLogs(prev => prev.map(l => l.id === logId ? { ...l, status: 'targeted', result } : l));
 
           if (Array.isArray(result)) {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -367,13 +370,13 @@ export function App() {
       } catch (error: unknown) {
           console.error("Gemini API Error", error);
           const errorMsg = (error as Error).message || "Unknown error";
-          setLogs(prev => prev.map(l => l.id === logId && l.result === null ? { ...l, result: { error: errorMsg } } : l));
+          setLogs(prev => prev.map(l => l.id === logId && l.result === null ? { ...l, status: 'failed', result: { error: errorMsg } } : l));
       } finally {
           setErLoading(false);
       }
   };
 
-  const handleClickToPick = async () => {
+  const handleClickToPick = async (selectedType: DetectType = 'Points') => {
     if (!simRef.current || erLoading || isPickingUp) return;
     setErLoading(true);
     simRef.current.renderSys.clearErMarkers();
@@ -409,11 +412,12 @@ export function App() {
       imageSrc: imageBase64,
       savedState,
       topPos,
-      target
+      target,
+      type: selectedType
     });
   };
 
-  const handleConfirmClickToPick = async (points: Array<{x: number, y: number}>, autoPickup = false) => {
+  const handleConfirmClickToPick = async (items: DetectedItem[], autoPickup = false) => {
     if (!simRef.current || !clickToPickData) return;
     const { imageSrc, savedState, topPos, target } = clickToPickData;
     setClickToPickData(null);
@@ -423,43 +427,48 @@ export function App() {
     await simRef.current.renderSys.moveCameraTo(savedState.position, savedState.target, 1500);
 
     const logId = uuidv4();
-    const detectedItems: DetectedItem[] = [];
+    const validTargets: DetectedItem[] = [];
 
-    // Process each clicked point through project2DTo3D exactly like prompt responses
-    points.forEach((pt, index) => {
-      const projection = simRef.current?.renderSys.project2DTo3D(pt.x, pt.y, topPos, target);
-      if (projection) {
-        const markerId = Date.now() + index + Math.random();
-        const label = points.length > 1 ? `Target ${index + 1}` : "Target";
-        simRef.current?.renderSys.addErMarker(projection.point, label, markerId);
-        detectedTargets.current.push({ pos: projection.point, markerId });
-        detectedItems.push({
-          point: [pt.y, pt.x],
-          label
-        });
+    // Process each item (supporting both points and bounding boxes)
+    items.forEach((item, index) => {
+      let center2d: { x: number; y: number } | null = null;
+      if (item.box_2d) {
+        const [ymin, xmin, ymax, xmax] = item.box_2d;
+        center2d = { x: (xmin + xmax) / 2, y: (ymin + ymax) / 2 };
+      } else if (item.point) {
+        const [y, x] = item.point;
+        center2d = { x, y };
+      }
+
+      if (center2d) {
+        const projection = simRef.current?.renderSys.project2DTo3D(center2d.x, center2d.y, topPos, target);
+        if (projection) {
+          const markerId = Date.now() + index + Math.random();
+          const label = item.label || (items.length > 1 ? `Target ${index + 1}` : "Target");
+          simRef.current?.renderSys.addErMarker(projection.point, label, markerId);
+          detectedTargets.current.push({ pos: projection.point, markerId });
+          validTargets.push(item);
+        }
       }
     });
 
     setDetectedCount(detectedTargets.current.length);
 
-    // Record entry in call history
+    const isBox = items.some(i => i.box_2d);
+    // Record entry in picked items history
     const newLog: LogEntry = {
       id: logId,
       timestamp: new Date(),
       imageSrc,
-      prompt: "Click to Pick",
-      fullPrompt: `Direct coordinate click: ${points.map(p => `[x:${p.x}, y:${p.y}]`).join(', ')}`,
-      type: "Points",
-      result: detectedItems.length > 0 ? detectedItems : [{ error: "No 3D object at clicked coordinate" }],
+      prompt: isBox ? `Visual Box Selection (${items.length})` : `Direct Point Selection (${items.length})`,
+      fullPrompt: `Direct Visual Click to Pick: ${JSON.stringify(items)}`,
+      type: isBox ? "2D bounding boxes" : "Points",
+      mode: "click-to-pick",
+      status: "targeted",
+      result: validTargets.length > 0 ? validTargets : [{ error: "No 3D object at clicked coordinates" }],
       requestData: {
-        model: "Click to Pick (Direct)",
-        contents: {
-          parts: [
-            { inlineData: { data: "<IMAGE>", mimeType: "image/png" } },
-            { text: `Direct coordinates captured: ${JSON.stringify(points)}` }
-          ]
-        },
-        config: {}
+        model: "Click to Pick",
+        items
       }
     };
     setLogs(prev => [newLog, ...prev]);
@@ -510,6 +519,21 @@ export function App() {
                 setDetectedCount(0); // Deactivates the button
                 detectedTargets.current = [];
                 simRef.current?.setSpeedMultiplier(1);
+
+                // Mark recent targeted entry in Picked Items History as 'picked'
+                setLogs(prev => {
+                  const targetedIdx = prev.findIndex(l => l.status === 'targeted' || (!l.status && Array.isArray(l.result) && (l.result as unknown[]).length > 0));
+                  if (targetedIdx !== -1) {
+                    const updated = [...prev];
+                    updated[targetedIdx] = {
+                      ...updated[targetedIdx],
+                      status: 'picked',
+                      pickedAt: new Date()
+                    };
+                    return updated;
+                  }
+                  return prev;
+                });
             });
         }
     }
@@ -614,6 +638,7 @@ export function App() {
           {clickToPickData && (
             <ClickToPickModal
               imageSrc={clickToPickData.imageSrc}
+              initialType={clickToPickData.type}
               isDarkMode={isDarkMode}
               onConfirm={handleConfirmClickToPick}
               onCancel={handleCancelClickToPick}
@@ -626,8 +651,23 @@ export function App() {
               <div className={`glass-panel overflow-hidden flex flex-col shadow-2xl transition-colors fixed top-4 bottom-4 left-4 right-4 rounded-[2.5rem] min-[660px]:relative min-[660px]:inset-auto min-[660px]:w-full min-[660px]:max-w-4xl min-[660px]:max-h-[85vh] ${isDarkMode ? 'bg-slate-900 border-white/10 text-slate-100' : 'bg-white border-white/80 text-slate-800'}`} onClick={e => e.stopPropagation()}>
                  <div className={`p-6 border-b flex justify-between items-center shrink-0 ${isDarkMode ? 'border-white/5 bg-white/5' : 'border-slate-100 bg-white/40'}`}>
                     <div>
-                      <h3 className="text-xl font-bold">API Call</h3>
-                      <p className={`text-xs font-medium ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{activeLog.timestamp.toLocaleString()}</p>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-xl font-bold">
+                          {activeLog.mode === 'click-to-pick' ? 'Direct Visual Pick' : 'Embodied Reasoning (AI)'}
+                        </h3>
+                        {activeLog.status === 'picked' ? (
+                          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 uppercase tracking-tight">
+                            Picked
+                          </span>
+                        ) : (
+                          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 uppercase tracking-tight">
+                            Targeted
+                          </span>
+                        )}
+                      </div>
+                      <p className={`text-xs font-medium ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                        {activeLog.timestamp.toLocaleString()} {activeLog.pickedAt ? `• Picked at ${activeLog.pickedAt.toLocaleTimeString()}` : ''}
+                      </p>
                     </div>
                     <button onClick={() => setExpandedLogId(null)} className={`w-10 h-10 flex items-center justify-center rounded-full shadow-sm border transition-colors ${isDarkMode ? 'bg-slate-800 border-white/10 text-slate-400 hover:text-slate-200' : 'bg-white border-slate-100 text-slate-400 hover:text-slate-600'}`}>
                       <X className="w-5 h-5" />
@@ -642,15 +682,15 @@ export function App() {
                     </div>
                     <div className={`min-[660px]:w-[320px] p-6 flex flex-col gap-5 min-[660px]:overflow-y-auto min-[660px]:custom-scrollbar ${isDarkMode ? 'bg-white/5' : 'bg-white/20'}`}>
                        <div className="space-y-1">
-                          <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">User Prompt</h4>
+                          <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Target Selection</h4>
                           <p className="text-sm font-bold leading-tight">{activeLog.prompt}</p>
                        </div>
                        <div className="space-y-1">
-                          <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Full Prompt</h4>
+                          <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Metadata / Instructions</h4>
                           <p className={`text-[10px] font-mono p-3 rounded-xl leading-relaxed border whitespace-pre-wrap ${isDarkMode ? 'bg-slate-950 border-white/5 text-slate-400' : 'bg-slate-50 border-slate-200/50 text-slate-500'}`}>{activeLog.fullPrompt}</p>
                        </div>
                        <div className="space-y-3 flex flex-col min-[660px]:flex-1 min-[660px]:min-h-0">
-                          <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">API Call Results</h4>
+                          <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Spatial Target Coordinates</h4>
                           <div className={`p-3 rounded-xl font-mono text-[10px] border overflow-y-auto shadow-inner min-[660px]:flex-1 max-[659px]:h-96 ${isDarkMode ? 'bg-slate-950 border-white/5 text-indigo-400' : 'bg-slate-50/50 border-slate-100 text-indigo-600'}`}>
                             {activeLog.result === null ? (
                                 <div className="h-full flex flex-col items-center justify-center gap-3 text-indigo-400 animate-pulse">
