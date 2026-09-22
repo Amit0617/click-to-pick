@@ -9,6 +9,7 @@ import loadMujoco from 'mujoco_wasm';
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
+import { IkSolveStats, IkSolverType } from './IkSystem';
 import { MujocoSim } from './MujocoSim';
 import { ClickToPickModal } from './components/ClickToPickModal';
 import { RobotSelector } from './components/RobotSelector';
@@ -114,6 +115,39 @@ export function App() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
   const [gizmoStats, setGizmoStats] = useState<{pos: string, rot: string} | null>(null);
+  const [ikSolver, setIkSolver] = useState<IkSolverType>('pyroki');
+  const [pyrokiAvailable, setPyrokiAvailable] = useState(false);
+  const [lastSolveStats, setLastSolveStats] = useState<IkSolveStats | null>(null);
+
+  // Probe PyRoKi FastAPI backend health
+  useEffect(() => {
+    let active = true;
+    const checkHealth = () => {
+      fetch('/api/health')
+        .then((r) => r.json())
+        .then((data) => {
+          if (active && data.status === 'ok') {
+            setPyrokiAvailable(true);
+          }
+        })
+        .catch(() => {
+          if (active) setPyrokiAvailable(false);
+        });
+    };
+    checkHealth();
+    const interval = setInterval(checkHealth, 5000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleSetIkSolver = (solver: IkSolverType) => {
+    setIkSolver(solver);
+    if (simRef.current) {
+      simRef.current.setIkSolver(solver);
+    }
+  };
 
   // Deriving activeLog directly from the latest logs state ensures UI reactivity
   const activeLog = expandedLogId ? logs.find(l => l.id === expandedLogId) : null;
@@ -157,8 +191,14 @@ export function App() {
              if (isMounted.current) setLoadingStatus(msg);
           })
              .then(() => {
-                 if (isMounted.current) {
-                     simRef.current?.setIkEnabled(false);
+                 if (isMounted.current && simRef.current) {
+                     simRef.current.setIkSolver(ikSolver);
+                     simRef.current.ikSys.onSolveCallback = (stats) => {
+                         if (isMounted.current) {
+                             setLastSolveStats(stats);
+                         }
+                     };
+                     simRef.current.setIkEnabled(false);
                      setIsLoading(false);
                  }
              })
@@ -553,8 +593,17 @@ export function App() {
       {/* 3D Container */}
       <div ref={containerRef} className="w-full h-full absolute inset-0 bg-slate-200" />
       
-      {/* Robot Info Overlay */}
-      {!loadError && <RobotSelector gizmoStats={gizmoStats} isDarkMode={isDarkMode} />}
+      {/* Robot Info & IK Solver Overlay */}
+      {!loadError && (
+        <RobotSelector
+          gizmoStats={gizmoStats}
+          isDarkMode={isDarkMode}
+          ikSolver={ikSolver}
+          setIkSolver={handleSetIkSolver}
+          pyrokiAvailable={pyrokiAvailable}
+          lastSolveStats={lastSolveStats}
+        />
+      )}
       
       {/* Loading Screen */}
       {isLoading && (

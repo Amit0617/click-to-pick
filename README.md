@@ -57,10 +57,22 @@ flowchart LR
 
 ### Installation & Run Locally
 1. Install dependencies:
-   `npm install`/`pnpm install`
+```sh
+npm install
+# or pnpm install
+```
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`/ `pnpm run dev`
+
+3. Run Backend in another terminal (leave that running)
+```sh
+cd server
+uv sync
+source .venv/bin/activate
+python3 pyroki_server.py
+```
+
+4. Run the app (in another terminal tab):
+   `npm run dev`/ `pnpm run dev` at the root of project.
 
 ### Run and deploy your AI Studio app
 

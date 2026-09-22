@@ -17,6 +17,7 @@ export class SequenceAnimator {
     running = false;
     step = 0; // Current step index in the sequence
     names: string[];  // Human-readable names for each step
+    private isPreparingStep = false;
     
     private timer = 0;    // Time elapsed in current step
     private duration = 1.0;       // Total duration for current step
@@ -119,11 +120,22 @@ export class SequenceAnimator {
         this.curCubeIdx = 0;
         this.droppedCount = 0;
         this.gripperVal = 0;
+        this.isPreparingStep = false;
     }
 
     // Called every frame to smoothly move the joints towards destination
     update(dt: number, ikTarget: THREE.Object3D, mjData: MujocoData, gripperId: number, ikSystem: IkSystem) {
         if (!this.running) return;
+        
+        // While waiting for asynchronous IK solve to complete (typically ~3-40ms), hold current joints
+        if (this.isPreparingStep) {
+            if (this.startJoints.length === 7) {
+                for(let i=0; i<7; i++) {
+                    mjData.ctrl[i] = this.startJoints[i];
+                }
+            }
+            return;
+        }
         
         this.timer += dt;
         // Percentage complete of current step (0.0 to 1.0)
@@ -176,8 +188,9 @@ export class SequenceAnimator {
     }
 
     // Sets up the start/end points and duration for the NEXT step in the sequence
-    // AND Solves IK for the target step.
-    prepareStep(ikTarget: THREE.Object3D, mjData: MujocoData, ikSystem: IkSystem) {
+    // AND Solves IK for the target step using the active IK solver (PyRoKi or Analytical).
+    async prepareStep(ikTarget: THREE.Object3D, mjData: MujocoData, ikSystem: IkSystem) {
+         this.isPreparingStep = true;
          // Start visual interpolation from where the gizmo is currently
          this.startPos.copy(ikTarget.position); 
          this.startQuat.copy(ikTarget.quaternion); 
@@ -317,13 +330,14 @@ export class SequenceAnimator {
                 this.running = false;
                 this.step = 0;
                 this.curCubeIdx = 0;
+                this.isPreparingStep = false;
                 if (this.onFinished) this.onFinished();
                 return; // Exit to avoid running IK solver again for invalid step
          }
          
          if (!useExplicitJoints) {
-             // SOLVE IK for the NEW target pose
-             const sol = ikSystem.solve(this.targetPos, this.targetQuat, this.startJoints);
+             // SOLVE IK for the NEW target pose with active solver (PyRoKi or Analytical)
+             const sol = await ikSystem.solveAsync(this.targetPos, this.targetQuat, this.startJoints);
              if (sol) {
                  this.targetJoints = sol;
              } else {
@@ -332,5 +346,9 @@ export class SequenceAnimator {
                  console.warn(`IK failed for step ${this.step}`);
              }
          }
+         
+         // Start interpolation timer only after target joints are determined
+         this.timer = 0;
+         this.isPreparingStep = false;
     }
 }
