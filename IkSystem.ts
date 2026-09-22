@@ -101,23 +101,38 @@ export class IkSystem {
         this.target.updateMatrixWorld();
         const transform = this.target.matrixWorld;
 
+        const euler = new THREE.Euler().setFromQuaternion(quat);
+        const eulerDeg = [
+            (euler.x * 180 / Math.PI).toFixed(1),
+            (euler.y * 180 / Math.PI).toFixed(1),
+            (euler.z * 180 / Math.PI).toFixed(1)
+        ];
+
+        console.log(`%c[Analytical IK] Solving target`, 'color: #3b82f6; font-weight: bold;', {
+            position: [Number(pos.x.toFixed(4)), Number(pos.y.toFixed(4)), Number(pos.z.toFixed(4))],
+            quaternion: [Number(quat.x.toFixed(4)), Number(quat.y.toFixed(4)), Number(quat.z.toFixed(4)), Number(quat.w.toFixed(4))],
+            eulerDeg: `[${eulerDeg.join(', ')}]°`,
+            currentJoints: currentQ.map(q => Number(q.toFixed(3)))
+        });
+
         // --- Redundancy Resolution Strategy ---
         // 1. Try solution with current q7 (fastest, keeps continuity)
         // 2. If valid, refine locally.
         // 3. If not, scan full range.
 
         // Weights for cost function: 
-        // Minimize (Distance to Current Joints) + (Distance to Neutral Joints)
+        // Minimize (Distance to Current Joints) + (Distance to Neutral Joints)        
         const alpha = 1.0; // Continuity weight
         const beta = 0.05;  // Neutrality weight
 
         let bestSolution: number[] | null = null;
         let minCost = Infinity;
+        let evaluatedCount = 0;
 
-        // Helper to check and update best
         const processCandidateQ7 = (q7: number) => {
              const solutions = calculateAnalyticalIK(transform, q7);
              for (const sol of solutions) {
+                 evaluatedCount++;
                  const distCurrent = squaredDistance(sol, currentQ);
                  const distNeutral = squaredDistance(sol, this.qNeutral);
                  const cost = alpha * distCurrent + beta * distNeutral;
@@ -153,6 +168,19 @@ export class IkSystem {
             this.onSolveCallback(this.lastSolveStats);
         }
 
+        if (bestSolution) {
+            const degs = (bestSolution as number[]).map(r => (r * 180 / Math.PI).toFixed(1) + '°');
+            console.log(`%c[Analytical IK] SUCCESS (${elapsed.toFixed(2)}ms, ${evaluatedCount} candidates evaluated)`, 'color: #10b981; font-weight: bold;', {
+                jointsRad: (bestSolution as number[]).map(r => Number(r.toFixed(4))),
+                jointsDeg: degs
+            });
+        } else {
+            console.warn(`%c[Analytical IK] FAILED (${elapsed.toFixed(2)}ms): Target out of physical reach or violates joint limits.`, 'color: #ef4444; font-weight: bold;', {
+                targetPosition: [Number(pos.x.toFixed(4)), Number(pos.y.toFixed(4)), Number(pos.z.toFixed(4))],
+                distFromBase: Math.sqrt(pos.x*pos.x + pos.y*pos.y + pos.z*pos.z).toFixed(3) + 'm (Max reach ~0.855m)'
+            });
+        }
+
         return bestSolution;
     }
 
@@ -161,6 +189,11 @@ export class IkSystem {
      */
     async solvePyroki(pos: THREE.Vector3, quat: THREE.Quaternion, currentQ: number[]): Promise<number[] | null> {
         const t0 = performance.now();
+        console.log(`%c[PyRoKi IK] Dispatching request to JAX solver`, 'color: #8b5cf6; font-weight: bold;', {
+            position: [Number(pos.x.toFixed(4)), Number(pos.y.toFixed(4)), Number(pos.z.toFixed(4))],
+            quaternion: [Number(quat.x.toFixed(4)), Number(quat.y.toFixed(4)), Number(quat.z.toFixed(4)), Number(quat.w.toFixed(4))]
+        });
+
         try {
             const res = await fetch('/api/ik/solve', {
                 method: 'POST',
@@ -173,24 +206,33 @@ export class IkSystem {
             });
 
             if (!res.ok) {
-                console.warn(`PyRoKi HTTP error ${res.status}, falling back to analytical`);
+                console.warn(`%c[PyRoKi IK] HTTP ${res.status} error, falling back to analytical solver`, 'color: #f59e0b; font-weight: bold;');
                 return this.solveAnalytical(pos, quat, currentQ);
             }
 
             const data = await res.json();
+            const totalElapsed = performance.now() - t0;
+
             if (data.success && Array.isArray(data.joints)) {
-                const elapsed = data.computation_time_ms || (performance.now() - t0);
+                const elapsed = data.computation_time_ms || totalElapsed;
                 this.lastSolveStats = { method: 'pyroki', timeMs: elapsed };
                 if (this.onSolveCallback) {
                     this.onSolveCallback(this.lastSolveStats);
                 }
+                const posErrStr = data.pos_error_m != null ? `${(data.pos_error_m * 1000).toFixed(2)}mm` : 'verified';
+                const rotErrStr = data.rot_error_rad != null ? `${data.rot_error_rad.toFixed(4)}rad` : 'verified';
+                console.log(`%c[PyRoKi IK] SUCCESS (JAX: ${elapsed}ms, roundtrip: ${totalElapsed.toFixed(1)}ms | pos_err: ${posErrStr}, rot_err: ${rotErrStr})`, 'color: #10b981; font-weight: bold;', {
+                    jointsRad: data.joints.map((r: number) => Number(r.toFixed(4))),
+                    posErrorM: data.pos_error_m,
+                    rotErrorRad: data.rot_error_rad
+                });
                 return data.joints;
             } else {
-                console.warn('PyRoKi returned unsuccessful, falling back to analytical:', data.error);
+                console.warn(`%c[PyRoKi IK] UNSUCCESSFUL: ${data.error || 'Tolerance limit exceeded'} (pos_err: ${(data.pos_error_m * 1000)?.toFixed(1)}mm). Falling back to Analytical solver...`, 'color: #f59e0b; font-weight: bold;', data);
                 return this.solveAnalytical(pos, quat, currentQ);
             }
         } catch (err) {
-            console.warn('PyRoKi solve request failed, falling back to analytical:', err);
+            console.warn(`%c[PyRoKi IK] Request failed (${err}), falling back to Analytical solver...`, 'color: #f59e0b; font-weight: bold;');
             return this.solveAnalytical(pos, quat, currentQ);
         }
     }

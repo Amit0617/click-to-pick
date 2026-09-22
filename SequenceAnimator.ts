@@ -337,13 +337,16 @@ export class SequenceAnimator {
          
          if (!useExplicitJoints) {
              // SOLVE IK for the NEW target pose with active solver (PyRoKi or Analytical)
+             const stepName = this.names[this.step] || `Step ${this.step}`;
+             console.log(`[SequenceAnimator] Step ${this.step} (${stepName}) -> Solving target [${this.targetPos.x.toFixed(3)}, ${this.targetPos.y.toFixed(3)}, ${this.targetPos.z.toFixed(3)}]`);
              const sol = await ikSystem.solveAsync(this.targetPos, this.targetQuat, this.startJoints);
              if (sol) {
                  this.targetJoints = sol;
+                 console.log(`[SequenceAnimator] Step ${this.step} (${stepName}) -> Pose reached successfully`);
              } else {
                  // If no solution, just stay put (safety)
                  this.targetJoints = [...this.startJoints];
-                 console.warn(`IK failed for step ${this.step}`);
+                 console.warn(`[SequenceAnimator] Step ${this.step} (${stepName}): IK failed for target [${this.targetPos.x.toFixed(3)}, ${this.targetPos.y.toFixed(3)}, ${this.targetPos.z.toFixed(3)}]. Arm remaining at current posture.`);
              }
          }
          

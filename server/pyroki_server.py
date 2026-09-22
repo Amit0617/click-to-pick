@@ -31,8 +31,11 @@ robot = pk.Robot.from_urdf(urdf)
 target_link_index = jnp.array(robot.links.names.index("panda_hand_tcp"))
 print(f"Robot loaded! Target link 'panda_hand_tcp' index: {int(target_link_index)}")
 
+# Franka Panda default home/neutral joint configuration
+Q_HOME = jnp.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.0], dtype=jnp.float32)
+
 @jax.jit
-def _solve_ik_jax(target_pos: jax.Array, target_wxyz: jax.Array, current_q: jax.Array) -> jax.Array:
+def _solve_and_verify_ik(target_pos: jax.Array, target_wxyz: jax.Array, rest_q: jax.Array, init_q: jax.Array):
     joint_var = robot.joint_var_cls(0)
     costs = [
         pk.costs.pose_cost_analytic_jac(
@@ -44,28 +47,35 @@ def _solve_ik_jax(target_pos: jax.Array, target_wxyz: jax.Array, current_q: jax.
             ori_weight=15.0,
         ),
         pk.costs.limit_constraint(robot, joint_var),
-        pk.costs.rest_cost(joint_var, rest_pose=current_q, weight=0.5),
+        pk.costs.rest_cost(joint_var, rest_pose=rest_q, weight=0.2),
     ]
     sol = (
         jaxls.LeastSquaresProblem(costs=costs, variables=[joint_var])
         .analyze()
         .solve(
-            initial_vals=jaxls.VarValues.make([joint_var.with_value(current_q)]),
+            initial_vals=jaxls.VarValues.make([joint_var.with_value(init_q)]),
             verbose=False,
             linear_solver="dense_cholesky",
             trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
         )
     )
-    return sol[joint_var]
+    q_sol = sol[joint_var]
+    fk = robot.forward_kinematics(q_sol)
+    se3 = jaxlie.SE3(fk[target_link_index])
+    pos_err = jnp.linalg.norm(se3.translation() - target_pos)
+    target_so3 = jaxlie.SO3(target_wxyz)
+    rot_err = jnp.linalg.norm((target_so3.inverse() @ se3.rotation()).log())
+    return q_sol, pos_err, rot_err
 
 # Warm-up JIT compilation on server startup
 print("Warming up JAX JIT compilation...")
-_p0 = jnp.array([0.4, 0.0, 0.2])
-_w0 = jnp.array([0.0, 1.0, 0.0, 0.0])
-_q0 = jnp.array([1.707, -1.754, 0.003, -2.702, 0.003, 0.951, 2.490, 0.0])
+_p0 = jnp.array([0.4, 0.0, 0.2], dtype=jnp.float32)
+_w0 = jnp.array([0.0, 1.0, 0.0, 0.0], dtype=jnp.float32)
+_q0 = jnp.array([1.707, -1.754, 0.003, -2.702, 0.003, 0.951, 2.490, 0.0], dtype=jnp.float32)
 _w_start = time.time()
-_res = _solve_ik_jax(_p0, _w0, _q0).block_until_ready()
-print(f"JIT Warm-up complete in {time.time() - _w_start:.2f}s!")
+_sol, _perr, _rerr = _solve_and_verify_ik(_p0, _w0, _q0, _q0)
+_sol.block_until_ready()
+print(f"JIT Warm-up complete in {time.time() - _w_start:.2f}s! Initial error: {_perr*1000:.2f}mm")
 
 class IKRequest(BaseModel):
     position: List[float] # [x, y, z]
@@ -76,6 +86,8 @@ class IKResponse(BaseModel):
     success: bool
     joints: Optional[List[float]] = None
     computation_time_ms: float
+    pos_error_m: Optional[float] = None
+    rot_error_rad: Optional[float] = None
     method: str = "pyroki"
     error: Optional[str] = None
 
@@ -108,17 +120,50 @@ def solve_ik(req: IKRequest):
             q_curr.append(0.0)
         current_q = jnp.array(q_curr, dtype=jnp.float32)
         
-        # Solve
-        sol = _solve_ik_jax(pos, wxyz, current_q).block_until_ready()
-        solved_joints = [float(x) for x in sol[:7]]
+        # 1st attempt: solve from current joint posture for trajectory continuity
+        sol, pos_err_jnp, rot_err_jnp = _solve_and_verify_ik(pos, wxyz, current_q, current_q)
+        sol.block_until_ready()
+        pos_err = float(pos_err_jnp)
+        rot_err = float(rot_err_jnp)
         
+        # Maximum allowed tolerance for robotic grasping: 25 mm
+        POS_TOLERANCE_M = 0.025
+        ROT_TOLERANCE_RAD = 0.35
+
+        # 2nd attempt: if local minimum or joint limits trapped the optimizer, restart from neutral home
+        if pos_err > POS_TOLERANCE_M:
+            sol_home, pos_err_home_jnp, rot_err_home_jnp = _solve_and_verify_ik(pos, wxyz, current_q, Q_HOME)
+            sol_home.block_until_ready()
+            pos_err_home = float(pos_err_home_jnp)
+            rot_err_home = float(rot_err_home_jnp)
+            if pos_err_home < pos_err:
+                sol, pos_err, rot_err = sol_home, pos_err_home, rot_err_home
+
         elapsed_ms = (time.time() - t_start) * 1000.0
-        return IKResponse(
-            success=True,
-            joints=solved_joints,
-            computation_time_ms=round(elapsed_ms, 2),
-            method="pyroki"
-        )
+        
+        # Verify convergence against physical tolerance
+        is_success = (pos_err <= POS_TOLERANCE_M) and (rot_err <= ROT_TOLERANCE_RAD)
+        
+        if is_success:
+            solved_joints = [float(x) for x in sol[:7]]
+            return IKResponse(
+                success=True,
+                joints=solved_joints,
+                computation_time_ms=round(elapsed_ms, 2),
+                pos_error_m=round(pos_err, 4),
+                rot_error_rad=round(rot_err, 4),
+                method="pyroki"
+            )
+        else:
+            return IKResponse(
+                success=False,
+                joints=None,
+                computation_time_ms=round(elapsed_ms, 2),
+                pos_error_m=round(pos_err, 4),
+                rot_error_rad=round(rot_err, 4),
+                method="pyroki",
+                error=f"Tolerance exceeded: position error is {pos_err * 1000:.1f} mm (limit {POS_TOLERANCE_M * 1000:.0f} mm), rotation error is {rot_err:.3f} rad"
+            )
     except Exception as e:
         elapsed_ms = (time.time() - t_start) * 1000.0
         return IKResponse(
