@@ -335,6 +335,14 @@ export class MujocoSim {
     setSpeedMultiplier(speed: number) {
         this.speedMultiplier = speed;
     }
+
+    setIkSolver(solver: 'analytical' | 'pyroki') {
+        this.ikSys.setSolverType(solver);
+    }
+
+    getIkSolver(): 'analytical' | 'pyroki' {
+        return this.ikSys.solverType;
+    }
     
     getGizmoStats() { return this.ikSys.calculating && this.ikSys.target ? { pos: this.ikSys.target.position.clone(), rot: new THREE.Euler().setFromQuaternion(this.ikSys.target.quaternion) } : null; }
     

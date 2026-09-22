@@ -12,8 +12,8 @@ flowchart LR
         subgraph v0["Robotics simulator in browser v0"]
             direction TB
             A1["Loading MuJoCo Wasm as environment"]
-            A2["Importing a robot in MuJoCo"]
-            A3["Implementing Inverse Kinematics (only for franka)"]
+            A2["Importing a robot (franka panda) in MuJoCo"]
+            A3["Implementing Inverse Kinematics (analytical only for franka)"]
             A4["Integrating Gemini Spatial understanding<br/>(annotates objects in scene)"]
             
             A1 ~~~ A2 ~~~ A3 ~~~ A4
@@ -22,8 +22,8 @@ flowchart LR
         subgraph v1["Robotics simulator in browser v1"]
             direction TB
             B1["Loading MuJoCo Wasm as environment"]
-            B2["Importing a robot in MuJoCo"]
-            B3["Implementing Inverse Kinematics (only for franka)"]
+            B2["Importing a robot (franka panda) in MuJoCo"]
+            B3["Implementing Inverse Kinematics (analytical only for franka)"]
             
             subgraph bottomRow[" "]
                 direction LR
@@ -33,6 +33,26 @@ flowchart LR
             
             B1 ~~~ B2 ~~~ B3 ~~~ bottomRow
         end
+
+        subgraph v2["Robotics simulator in browser v2"]
+            direction TB
+            C1["Loading MuJoCo Wasm as environment"]
+            C2["Importing a robot (franka panda) in MuJoCo"]
+            
+            subgraph aboveBottomRow[" "]
+                direction LR
+                C3["Implementing Inverse Kinematics (analytical only for franka)"]
+                C4["PyRoKi Fast API backend with generalized IK"]
+            end
+
+            subgraph bottomRow1[" "]
+                direction LR
+                C5["Integrating Gemini<br/>Spatial understanding<br/>(annotates objects in scene)"]
+                C6["Manually Clicking on object to Pick"]
+            end
+            
+            C1 ~~~ C2 ~~~ aboveBottomRow ~~~ bottomRow1
+        end
    end
 
     %% Styles
@@ -40,11 +60,13 @@ flowchart LR
     classDef greenCard fill:#E6F7ED,stroke:#34C759,stroke-width:1.5px,color:#1C1C1E,rx:6px;
     
     class B5 greenCard;
+    class C4 greenCard;
     
     style root fill:none,stroke:none;
     style v0 fill:#F9F9F9,stroke:#E5E5E5,stroke-width:1px,rx:10px;
     style v1 fill:#F9F9F9,stroke:#E5E5E5,stroke-width:1px,rx:10px;
-    style bottomRow fill:none,stroke:none;
+    style v2 fill:#F9F9F9,stroke:#E5E5E5,stroke-width:1px,rx:10px;
+
 ```
 
 `Robotics simulator in browser v0` is taken from [Xavier Plantaz from Google AI](https://dev.to/googleai/building-a-gemini-powered-robotics-simulator-in-the-browser-with-mujoco-wasm-hjj) 
@@ -57,10 +79,22 @@ flowchart LR
 
 ### Installation & Run Locally
 1. Install dependencies:
-   `npm install`/`pnpm install`
+```sh
+npm install
+# or pnpm install
+```
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`/ `pnpm run dev`
+
+3. Run Backend in another terminal (leave that running)
+```sh
+cd server
+uv sync
+source .venv/bin/activate
+python3 pyroki_server.py
+```
+
+4. Run the app (in another terminal tab):
+   `npm run dev`/ `pnpm run dev` at the root of project.
 
 ### Run and deploy your AI Studio app
 
