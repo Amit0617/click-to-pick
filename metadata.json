@@ -1,6 +1,8 @@
 {
-  "name": "Robotics Click to Pick",
-  "description": "Simulated Franka Panda Picking items as chosen by user",
+  "name": "Generalize manipulator click to pick",
+  "description": "Simulated any manipulator Picking items as chosen by user",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

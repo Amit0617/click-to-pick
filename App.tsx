@@ -13,8 +13,10 @@ import { IkSolveStats, IkSolverType } from './IkSystem';
 import { MujocoSim } from './MujocoSim';
 import { ClickToPickModal } from './components/ClickToPickModal';
 import { RobotSelector } from './components/RobotSelector';
+import { RobotSelectorPill } from './components/RobotSelectorPill';
 import { Toolbar } from './components/Toolbar';
 import { UnifiedSidebar } from './components/UnifiedSidebar';
+import { ROBOT_CONFIGS, DEFAULT_ROBOT_ID } from './robots';
 import { DetectedItem, DetectType, LogEntry, MujocoModule } from './types';
 
 /**
@@ -114,6 +116,7 @@ export function App() {
   const [isPickingUp, setIsPickingUp] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
+  const [selectedRobotId, setSelectedRobotId] = useState<string>(DEFAULT_ROBOT_ID);
   const [gizmoStats, setGizmoStats] = useState<{pos: string, rot: string} | null>(null);
   const [ikSolver, setIkSolver] = useState<IkSolverType>('pyroki');
   const [pyrokiAvailable, setPyrokiAvailable] = useState(false);
@@ -147,6 +150,49 @@ export function App() {
     if (simRef.current) {
       simRef.current.setIkSolver(solver);
     }
+  };
+
+  const handleSelectRobot = (robotId: string) => {
+    if (robotId === selectedRobotId || !simRef.current || isLoading) return;
+    const spec = ROBOT_CONFIGS[robotId] || ROBOT_CONFIGS.franka_panda;
+    setSelectedRobotId(robotId);
+    setIsLoading(true);
+    setLoadingStatus(`Loading ${spec.name}...`);
+    setLoadError(null);
+    setIsPaused(false);
+    setIsPickingUp(false);
+    setLogs([]);
+    setDetectedCount(0);
+    detectedTargets.current = [];
+
+    // Ensure compatible solver
+    let targetSolver = ikSolver;
+    if (!spec.availableSolvers.includes(targetSolver)) {
+      targetSolver = spec.defaultSolver;
+      setIkSolver(targetSolver);
+    }
+
+    simRef.current.init(spec.id, spec.sceneFile, (msg) => {
+      if (isMounted.current) setLoadingStatus(msg);
+    })
+      .then(() => {
+        if (isMounted.current && simRef.current) {
+          simRef.current.setIkSolver(targetSolver);
+          simRef.current.ikSys.onSolveCallback = (stats) => {
+            if (isMounted.current) {
+              setLastSolveStats(stats);
+            }
+          };
+          simRef.current.setIkEnabled(false);
+          setIsLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (isMounted.current) {
+          setLoadError(err.message || `Failed to load ${spec.name}`);
+          setIsLoading(false);
+        }
+      });
   };
 
   // Deriving activeLog directly from the latest logs state ensures UI reactivity
@@ -187,7 +233,7 @@ export function App() {
           simRef.current = new MujocoSim(containerRef.current, mujocoModuleRef.current);
           simRef.current.renderSys.setDarkMode(isDarkMode);
           
-          simRef.current.init("franka_panda_stack", "scene.xml", (msg) => {
+          simRef.current.init(selectedRobotId, "scene.xml", (msg) => {
              if (isMounted.current) setLoadingStatus(msg);
           })
              .then(() => {
@@ -593,9 +639,21 @@ export function App() {
       {/* 3D Container */}
       <div ref={containerRef} className="w-full h-full absolute inset-0 bg-slate-200" />
       
+      {/* Top Center Floating Robot Selector Pill */}
+      {!loadError && (
+        <RobotSelectorPill
+          currentRobotId={selectedRobotId}
+          onSelectRobot={handleSelectRobot}
+          isDarkMode={isDarkMode}
+          pyrokiAvailable={pyrokiAvailable}
+          isLoading={isLoading}
+        />
+      )}
+
       {/* Robot Info & IK Solver Overlay */}
       {!loadError && (
         <RobotSelector
+          currentRobotId={selectedRobotId}
           gizmoStats={gizmoStats}
           isDarkMode={isDarkMode}
           ikSolver={ikSolver}
@@ -612,13 +670,14 @@ export function App() {
                   <div className={`glass-panel p-12 rounded-[3rem] flex-1 flex flex-col justify-center shadow-2xl transition-colors ${isDarkMode ? 'bg-slate-900/70 border-white/10' : 'bg-white/70 border-white/80'}`}>
                     <h3 className={`text-sm font-bold uppercase tracking-widest mb-4 ${isDarkMode ? 'text-indigo-400' : 'text-indigo-600'}`}>System Overview</h3>
                     <p className={`text-sm leading-relaxed mb-6 ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                      This demo showcases spatial perception and robotic manipulation in the browser. Target objects using <strong>Gemini Embodied Reasoning</strong> or directly via <strong>Click to Pick</strong> to calculate manipulation coordinates for the Franka Emika Panda arm.
+                      This demo showcases multi-robot spatial perception and robotic manipulation in the browser. Target objects using <strong>Gemini Embodied Reasoning</strong> or directly via <strong>Click to Pick</strong> to calculate manipulation coordinates for <strong>Franka Emika Panda</strong> or <strong>Universal Robots UR5e</strong> with generalized PyRoKi IK.
                     </p>
                     <ul className={`text-[13px] space-y-3 list-disc list-inside ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                         <li>Real-time MuJoCo physics simulation in WebAssembly</li>
-                        <li>Analytical Inverse Kinematics (IK) for Franka Panda 7-DOF</li>
-                        <li>Gemini Embodied Reasoning (points & bounding boxes)</li>
-                        <li>Click to Pick for direct visual targeting and pickup</li>
+                        <li>Multi-robot support: Franka Panda (7-DOF) & Universal Robots UR5e (6-DOF)</li>
+                        <li>Robotiq 2F-85 adaptive parallel gripper integration</li>
+                        <li>PyRoKi JAX differentiable Inverse Kinematics optimizer</li>
+                        <li>Click to Pick direct visual targeting and autonomous placement</li>
                     </ul>
                   </div>
 

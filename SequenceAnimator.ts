@@ -1,17 +1,17 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
-*/
-
+ */
 
 import * as THREE from 'three';
 import { IkSystem } from './IkSystem';
+import { RobotSpec } from './robots';
 import { MujocoData, MujocoModel } from './types';
 
 /**
  * SequenceAnimator
- * A simple state machine that automates the robot.
- * Uses Joint Space Interpolation: solves IK for the target Step and interpolates joint angles.
+ * A generalized state machine that automates pick-and-place trajectories for any manipulator morphology.
+ * Uses Joint Space Interpolation: solves IK for the target Step and smoothly interpolates joint angles.
  */
 export class SequenceAnimator {
     running = false;
@@ -22,12 +22,12 @@ export class SequenceAnimator {
     private timer = 0;    // Time elapsed in current step
     private duration = 1.0;       // Total duration for current step
     
-    private cubeIds: number[] = []; // MuJoCo body IDs of the cubes to pick up (for Live mode)
-    private curCubeIdx = 0; // Which cube are we currently trying to pick?
-    private droppedCount = 0; // How many cubes have been successfully stacked
+    private cubeIds: number[] = []; // MuJoCo body IDs of the cubes to pick up
+    private curCubeIdx = 0; // Which cube are we currently picking?
+    private droppedCount = 0; // How many cubes have been placed
     private trayId = -1;    // Body ID of the target tray
     
-    // New: Explicit Target Positions (for Blind/ER mode)
+    // Explicit Target Positions (for Blind/ER mode)
     private targetPositions: THREE.Vector3[] = [];
     private markerIds: number[] = [];
     private useLivePosition = false;
@@ -37,31 +37,43 @@ export class SequenceAnimator {
     private startQuat = new THREE.Quaternion();
     private targetPos = new THREE.Vector3(); 
     private targetQuat = new THREE.Quaternion();
+    private homePos = new THREE.Vector3();
+    private homeQuat = new THREE.Quaternion();
     
-    // Joint Interpolation
+    // Joint Interpolation (variable DOF)
     private startJoints: number[] = [];
     private targetJoints: number[] = [];
     
-    private gripperVal = 0; // 0 = Open/Closed (dependent on model, usually 0=Closed, 255/0.08=Open)
+    private dof!: number;
+    private homeJoints!: number[];
+    private gripperVal!: number;
+    private gripperOpenVal!: number;
+    private gripperCloseVal!: number;
     private isStacking = false;
     
-    // Callback to notify app of completion of a single pickup (passes Body ID or Marker ID)
+    // Callbacks
     private onPickupComplete?: (id: number) => void;
-    // Callback to notify app when the entire sequence is finished
     private onFinished?: () => void;
 
     constructor() {
         this.names = ["Move over Cube", "Hover", "Open", "Lower", "Wait", "Grasp", "Wait", "Lift", "Move to Tray", "Lower", "Wait", "Release", "Wait", "Lift", "Return Home"];
     }
 
-    // Initialize by finding the IDs of all cubes and the tray
-    init(mjModel: MujocoModel, isStacking: boolean, getName: (addr: number) => string) {
+    // Initialize by scanning scene bodies and caching active robot spec
+    init(mjModel: MujocoModel, isStacking: boolean, getName: (addr: number) => string, robotSpec: RobotSpec) {
         this.isStacking = isStacking;
-        // Default initialization just scans the scene
         this.trayId = -1;
+
+        this.dof = robotSpec.dof;
+        this.homeJoints = [...robotSpec.homeJoints];
+        this.gripperOpenVal = robotSpec.gripperOpenVal;
+        this.gripperCloseVal = robotSpec.gripperCloseVal;
+
         for (let i = 0; i < mjModel.nbody; i++) {
             const n = getName(mjModel.name_bodyadr[i]);
-            if (n === 'stack_base' || (!isStacking && n === 'tray')) this.trayId = i;
+            if (n === 'stack_base' || (!isStacking && n === 'tray')) {
+                this.trayId = i;
+            }
         }
     }
 
@@ -69,28 +81,30 @@ export class SequenceAnimator {
      * Start the sequence.
      * @param targets Can be an array of body IDs (number[]) OR an object with { positions, markerIds } for blind mode.
      */
-    start(ikTarget: THREE.Object3D, mjData: MujocoData, ikSystem: IkSystem, 
-          targets?: { positions: THREE.Vector3[], markerIds: number[] } | number[], 
-          onPickupComplete?: (id: number) => void,
-          onFinished?: () => void) {
-        
+    start(
+        ikTarget: THREE.Object3D, 
+        mjData: MujocoData, 
+        ikSystem: IkSystem, 
+        targets?: { positions: THREE.Vector3[], markerIds: number[] } | number[], 
+        onPickupComplete?: (id: number) => void,
+        onFinished?: () => void
+    ) {
         this.onPickupComplete = onPickupComplete;
         this.onFinished = onFinished;
         
         if (targets && !Array.isArray(targets) && 'positions' in targets) {
-             // Static Positions Mode (ER/Blind)
-             this.targetPositions = targets.positions;
-             this.markerIds = targets.markerIds;
-             this.useLivePosition = false;
-             this.cubeIds = []; 
+            this.targetPositions = targets.positions;
+            this.markerIds = targets.markerIds;
+            this.useLivePosition = false;
+            this.cubeIds = []; 
         } else {
              // Default / ID mode
-             this.useLivePosition = true;
-             if (Array.isArray(targets) && targets.length > 0) {
-                 this.cubeIds = [...targets];
-             } else {
-                 this.cubeIds = [];
-             }
+            this.useLivePosition = true;
+            if (Array.isArray(targets) && targets.length > 0) {
+                this.cubeIds = [...targets];
+            } else {
+                this.cubeIds = [];
+            }
         }
 
         // If `init` was called, `trayId` is set. 
@@ -103,9 +117,9 @@ export class SequenceAnimator {
         this.running = true; 
         this.step = 0; 
         this.curCubeIdx = 0;
-        // NOTE: We do NOT reset droppedCount here. It persists across pickup batches.
-        
-        this.gripperVal = 0;
+        this.gripperVal = this.gripperCloseVal;
+        this.homePos.copy(ikTarget.position);
+        this.homeQuat.copy(ikTarget.quaternion);
         this.prepareStep(ikTarget, mjData, ikSystem);
     }
 
@@ -113,13 +127,12 @@ export class SequenceAnimator {
         this.running = false;
     }
 
-    // Full reset (e.g. when simulation resets)
     reset() {
         this.running = false;
         this.step = 0;
         this.curCubeIdx = 0;
         this.droppedCount = 0;
-        this.gripperVal = 0;
+        this.gripperVal = this.gripperCloseVal;
         this.isPreparingStep = false;
     }
 
@@ -127,10 +140,10 @@ export class SequenceAnimator {
     update(dt: number, ikTarget: THREE.Object3D, mjData: MujocoData, gripperId: number, ikSystem: IkSystem) {
         if (!this.running) return;
         
-        // While waiting for asynchronous IK solve to complete (typically ~3-40ms), hold current joints
+        // While waiting for asynchronous IK solve to complete (~5-40ms), hold current joints
         if (this.isPreparingStep) {
-            if (this.startJoints.length === 7) {
-                for(let i=0; i<7; i++) {
+            for (let i = 0; i < this.dof; i++) {
+                if (i < this.startJoints.length) {
                     mjData.ctrl[i] = this.startJoints[i];
                 }
             }
@@ -144,10 +157,9 @@ export class SequenceAnimator {
         // Ease-in-out for smoother movement (Smoothstep)
         const ease = p * p * (3 - 2 * p); 
         
-        // 1. Joint Space Interpolation
-        // We interpolate the actuator commands (ctrl) directly.
-        if (this.startJoints.length === 7 && this.targetJoints.length === 7) {
-            for(let i=0; i<7; i++) {
+        // 1. Joint Space Interpolation for arm actuators
+        for (let i = 0; i < this.dof; i++) {
+            if (i < this.startJoints.length && i < this.targetJoints.length) {
                 mjData.ctrl[i] = this.startJoints[i] + (this.targetJoints[i] - this.startJoints[i]) * ease;
             }
         }
@@ -164,7 +176,6 @@ export class SequenceAnimator {
              
              // Calculate shortest angular path
              const dTheta = targetTheta - startTheta;
-             
              const curR = startR + (targetR - startR) * ease;
              const curTheta = startTheta + dTheta * ease;
              const curZ = this.startPos.z + (this.targetPos.z - this.startPos.z) * ease;
@@ -177,10 +188,12 @@ export class SequenceAnimator {
         
         ikTarget.quaternion.slerpQuaternions(this.startQuat, this.targetQuat, ease);
         
-        // Apply gripper command
-        if (gripperId !== -1) mjData.ctrl[gripperId] = this.gripperVal;
+        // Apply gripper command to actuator
+        if (gripperId !== -1) {
+            mjData.ctrl[gripperId] = this.gripperVal;
+        }
         
-        // If step finished, move to next
+        // If step finished, move to next step
         if (p >= 1.0) { 
             this.step++; 
             this.prepareStep(ikTarget, mjData, ikSystem); 
@@ -188,17 +201,17 @@ export class SequenceAnimator {
     }
 
     // Sets up the start/end points and duration for the NEXT step in the sequence
-    // AND Solves IK for the target step using the active IK solver (PyRoKi or Analytical).
     async prepareStep(ikTarget: THREE.Object3D, mjData: MujocoData, ikSystem: IkSystem) {
          this.isPreparingStep = true;
-         // Start visual interpolation from where the gizmo is currently
          this.startPos.copy(ikTarget.position); 
          this.startQuat.copy(ikTarget.quaternion); 
          this.timer = 0;
 
-         // Capture current joints as start
+         // Capture current arm joints as start
          this.startJoints = [];
-         for(let i=0; i<7; i++) this.startJoints.push(mjData.qpos[i]);
+         for (let i = 0; i < this.dof; i++) {
+             this.startJoints.push(mjData.qpos[i]);
+         }
          
          // Get current cube position
          const cPos = new THREE.Vector3();
@@ -218,7 +231,7 @@ export class SequenceAnimator {
          // Get tray position
          const tPos = new THREE.Vector3(mjData.xpos[this.trayId*3], mjData.xpos[this.trayId*3+1], mjData.xpos[this.trayId*3+2]);
          
-         // Default gripper orientation (pointing down)
+         // Default downward gripper orientation
          const downQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI, 0, 0));
          
          // Calculate drop-off position (higher if stacking)
@@ -314,15 +327,13 @@ export class SequenceAnimator {
                     return;
                 }
 
-                // No more cubes - Return to Home
+                // Return to neutral Home pose
                 this.duration = 2.0;
-                this.targetPos.set(0, 0, 0.45);
-                this.targetQuat.setFromEuler(new THREE.Euler(Math.PI, 0, 0)); 
-                this.gripperVal = 255;
+                this.targetPos.copy(this.homePos);
+                this.targetQuat.copy(this.homeQuat); 
+                this.gripperVal = this.gripperOpenVal;
 
-                // EXPLICIT HOME JOINTS (Skip IK)
-                // Matches MujocoSim.ts setInitialPose
-                this.targetJoints = [1.707, -1.754, 0.003, -2.702, 0.003, 0.951, 2.490]; 
+                this.targetJoints = [...this.homeJoints]; 
                 useExplicitJoints = true;
                 break;
 
@@ -332,7 +343,7 @@ export class SequenceAnimator {
                 this.curCubeIdx = 0;
                 this.isPreparingStep = false;
                 if (this.onFinished) this.onFinished();
-                return; // Exit to avoid running IK solver again for invalid step
+                return;
          }
          
          if (!useExplicitJoints) {
@@ -344,13 +355,11 @@ export class SequenceAnimator {
                  this.targetJoints = sol;
                  console.log(`[SequenceAnimator] Step ${this.step} (${stepName}) -> Pose reached successfully`);
              } else {
-                 // If no solution, just stay put (safety)
                  this.targetJoints = [...this.startJoints];
-                 console.warn(`[SequenceAnimator] Step ${this.step} (${stepName}): IK failed for target [${this.targetPos.x.toFixed(3)}, ${this.targetPos.y.toFixed(3)}, ${this.targetPos.z.toFixed(3)}]. Arm remaining at current posture.`);
+                 console.warn(`[SequenceAnimator] Step ${this.step} (${this.names[this.step]}): IK failed for target [${this.targetPos.x.toFixed(3)}, ${this.targetPos.y.toFixed(3)}, ${this.targetPos.z.toFixed(3)}].`);
              }
          }
          
-         // Start interpolation timer only after target joints are determined
          this.timer = 0;
          this.isPreparingStep = false;
     }

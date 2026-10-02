@@ -1,18 +1,18 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
-*/
-
+ */
 
 import * as THREE from 'three';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { calculateAnalyticalIK } from './FrankaAnalyticalIK';
+import { ROBOT_CONFIGS, RobotSpec } from './robots';
 import { MujocoData, MujocoModel, MujocoModule } from './types';
 
 function squaredDistance(arr1: number[], arr2: number[]) {
     let sum = 0;
-    for (let i = 0; i < arr1.length; i++) {
+    for (let i = 0; i < Math.min(arr1.length, arr2.length); i++) {
         sum += (arr1[i] - arr2[i]) ** 2;
     }
     return sum;
@@ -23,12 +23,13 @@ export type IkSolverType = 'analytical' | 'pyroki';
 export interface IkSolveStats {
     method: 'analytical' | 'pyroki';
     timeMs: number;
+    robotId?: string;
 }
 
 /**
  * IkSystem
- * Handles Inverse Kinematics calculations using either the analytical solver
- * or the PyRoKi (JAX-based differentiable optimization) FastAPI backend.
+ * Handles Inverse Kinematics calculations using either the Franka 7-DOF analytical solver
+ * or the PyRoKi (JAX-based differentiable optimization) FastAPI backend for arbitrary robots (Franka, UR5e).
  */
 export class IkSystem {
     target: THREE.Group;
@@ -37,6 +38,10 @@ export class IkSystem {
     calculating = false;
     gripperSiteId = -1;
 
+    currentRobotId = 'franka_panda';
+    currentSpec: RobotSpec = ROBOT_CONFIGS.franka_panda;
+    dof = 7;
+
     solverType: IkSolverType = 'pyroki';
     lastSolveStats: IkSolveStats | null = null;
     onSolveCallback: ((stats: IkSolveStats) => void) | null = null;
@@ -44,7 +49,7 @@ export class IkSystem {
     private isAsyncSolving = false;
     private qNeutral = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]; // Preferred "home" pose
     
-    // Joint 7 parameters for redundancy resolution in analytical solver
+    // Joint 7 parameters for redundancy resolution in Franka analytical solver
     private readonly q7Min = -2.8973;
     private readonly q7Max = 2.8973;
     private readonly q7Step = 0.1; 
@@ -65,8 +70,21 @@ export class IkSystem {
         this.control.attach(this.target);
     }
 
+    setRobot(robotId: string) {
+        this.currentRobotId = robotId;
+        this.currentSpec = ROBOT_CONFIGS[robotId] || ROBOT_CONFIGS.franka_panda;
+        this.dof = this.currentSpec.dof;
+        this.qNeutral = [...this.currentSpec.homeJoints];
+
+        if (!this.currentSpec.availableSolvers.includes(this.solverType)) {
+            this.solverType = this.currentSpec.defaultSolver;
+        }
+    }
+
     setSolverType(type: IkSolverType) {
-        this.solverType = type;
+        if (this.currentSpec.availableSolvers.includes(type)) {
+            this.solverType = type;
+        }
     }
     
     init(mjModel: MujocoModel, isDouble: boolean) {
@@ -91,10 +109,14 @@ export class IkSystem {
     }
 
     /**
-     * Solves IK for a specific Cartesian pose.
-     * Returns the joint angles (array of 7 numbers) or null if no solution found.
+     * Solves IK using analytical geometric formula (Franka Panda only).
      */
     solveAnalytical(pos: THREE.Vector3, quat: THREE.Quaternion, currentQ: number[]): number[] | null {
+        if (this.currentRobotId !== 'franka_panda') {
+            console.warn(`[Analytical IK] Analytical closed-form solver is only available for Franka Panda 7-DOF. Using PyRoKi for ${this.currentSpec.name}.`);
+            return null;
+        }
+
         const t0 = performance.now();
         this.target.position.copy(pos);
         this.target.quaternion.copy(quat);
@@ -163,7 +185,7 @@ export class IkSystem {
         }
 
         const elapsed = performance.now() - t0;
-        this.lastSolveStats = { method: 'analytical', timeMs: elapsed };
+        this.lastSolveStats = { method: 'analytical', timeMs: elapsed, robotId: this.currentRobotId };
         if (this.onSolveCallback) {
             this.onSolveCallback(this.lastSolveStats);
         }
@@ -185,7 +207,7 @@ export class IkSystem {
     }
 
     /**
-     * Solves IK using PyRoKi FastAPI backend with fallback to analytical solver if unavailable.
+     * Solves IK using PyRoKi FastAPI backend with generalized robot morphology support.
      */
     async solvePyroki(pos: THREE.Vector3, quat: THREE.Quaternion, currentQ: number[]): Promise<number[] | null> {
         const t0 = performance.now();
@@ -199,15 +221,19 @@ export class IkSystem {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    robot_id: this.currentSpec.pyrokiRobotId,
                     position: [pos.x, pos.y, pos.z],
                     quaternion: [quat.x, quat.y, quat.z, quat.w],
-                    current_joints: currentQ
+                    current_joints: currentQ.slice(0, this.dof)
                 })
             });
 
             if (!res.ok) {
-                console.warn(`%c[PyRoKi IK] HTTP ${res.status} error, falling back to analytical solver`, 'color: #f59e0b; font-weight: bold;');
-                return this.solveAnalytical(pos, quat, currentQ);
+                if (this.currentSpec.availableSolvers.includes('analytical')) {
+                    console.warn(`%c[PyRoKi IK] HTTP ${res.status} error, falling back to analytical solver`, 'color: #f59e0b; font-weight: bold;');
+                    return this.solveAnalytical(pos, quat, currentQ);
+                }
+                return null;
             }
 
             const data = await res.json();
@@ -215,7 +241,7 @@ export class IkSystem {
 
             if (data.success && Array.isArray(data.joints)) {
                 const elapsed = data.computation_time_ms || totalElapsed;
-                this.lastSolveStats = { method: 'pyroki', timeMs: elapsed };
+                this.lastSolveStats = { method: 'pyroki', timeMs: elapsed, robotId: this.currentRobotId };
                 if (this.onSolveCallback) {
                     this.onSolveCallback(this.lastSolveStats);
                 }
@@ -228,12 +254,18 @@ export class IkSystem {
                 });
                 return data.joints;
             } else {
-                console.warn(`%c[PyRoKi IK] UNSUCCESSFUL: ${data.error || 'Tolerance limit exceeded'} (pos_err: ${(data.pos_error_m * 1000)?.toFixed(1)}mm). Falling back to Analytical solver...`, 'color: #f59e0b; font-weight: bold;', data);
-                return this.solveAnalytical(pos, quat, currentQ);
+                if (this.currentSpec.availableSolvers.includes('analytical')) {
+                    console.warn(`%c[PyRoKi IK] UNSUCCESSFUL: ${data.error || 'Tolerance limit exceeded'} (pos_err: ${(data.pos_error_m * 1000)?.toFixed(1)}mm). Falling back to Analytical solver...`, 'color: #f59e0b; font-weight: bold;', data);
+                    return this.solveAnalytical(pos, quat, currentQ);
+                }
+                return null;
             }
         } catch (err) {
-            console.warn(`%c[PyRoKi IK] Request failed (${err}), falling back to Analytical solver...`, 'color: #f59e0b; font-weight: bold;');
-            return this.solveAnalytical(pos, quat, currentQ);
+            console.warn(`%c[PyRoKi IK] Request failed (${err}), checking available fallbacks...`, 'color: #f59e0b; font-weight: bold;');
+            if (this.currentSpec.availableSolvers.includes('analytical')) {
+                return this.solveAnalytical(pos, quat, currentQ);
+            }
+            return null;
         }
     }
 
@@ -258,9 +290,9 @@ export class IkSystem {
     update(mjModel: MujocoModel, mjData: MujocoData) {
         if (!this.calculating) return;
         
-        // Prepare current state
+        // Prepare current state for arm joints
         const currentQ: number[] = [];
-        for(let i=0; i<7; i++) currentQ.push(mjData.qpos[i]);
+        for (let i = 0; i < this.dof; i++) currentQ.push(mjData.qpos[i]);
 
         if (this.solverType === 'pyroki') {
             if (!this.isAsyncSolving) {
@@ -268,7 +300,7 @@ export class IkSystem {
                 this.solvePyroki(this.target.position, this.target.quaternion, currentQ)
                     .then((solution) => {
                         if (solution) {
-                            for(let i=0; i<7; i++) {
+                            for (let i = 0; i < Math.min(solution.length, this.dof); i++) {
                                 mjData.ctrl[i] = solution[i];
                             }
                         }
@@ -281,7 +313,7 @@ export class IkSystem {
             // Solve analytical
             const solution = this.solveAnalytical(this.target.position, this.target.quaternion, currentQ);
             if (solution) {
-                for(let i=0; i<7; i++) {
+                for (let i = 0; i < Math.min(solution.length, this.dof); i++) {
                     mjData.ctrl[i] = solution[i];
                 }
             }
@@ -306,7 +338,7 @@ export class IkSystem {
     }
     
     isActuatorIkControlled(id: number) {
-        return id >= 0 && id < 7;
+        return id >= 0 && id < this.dof;
     }
     
     dispose() {

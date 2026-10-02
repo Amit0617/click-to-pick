@@ -14,6 +14,8 @@ import { SequenceAnimator } from './SequenceAnimator';
 import { MujocoData, MujocoModel, MujocoModule } from './types';
 import { getName } from './utils/StringUtils';
 
+import { ROBOT_CONFIGS, RobotSpec } from './robots';
+
 /**
  * MujocoSim: The Central Orchestrator.
  * Manages the connection between the MuJoCo WASM engine and the Three.js visualization.
@@ -34,9 +36,11 @@ export class MujocoSim {
     paused = false;
     gripperActuatorId = -1;
     speedMultiplier = 1;
+
+    currentRobotId = 'franka_panda';
+    currentSpec: RobotSpec = ROBOT_CONFIGS.franka_panda;
     
     private userIkEnabled = false; 
-    private firstIkEnable = true; // Track first enable to enforce default rotation
 
     // Gizmo Interpolation State
     private gizmoAnim = {
@@ -67,7 +71,10 @@ export class MujocoSim {
         this.renderSys.initLights(this.dragStateManager);
     }
 
-    async init(robotId = 'franka_emika_panda', sceneFile = 'scene.xml', onProgress?: (msg: string) => void) {
+    async init(robotId = 'franka_panda', sceneFile = 'scene.xml', onProgress?: (msg: string) => void) {
+        this.currentRobotId = robotId;
+        this.currentSpec = ROBOT_CONFIGS[robotId] || ROBOT_CONFIGS.franka_panda;
+
         const loader = new RobotLoader(this.mujoco);
         const { isDouble, isStacking } = await loader.load(robotId, sceneFile, onProgress);
 
@@ -79,16 +86,32 @@ export class MujocoSim {
         }
 
         if (this.mjModel) {
+            this.ikSys.setRobot(this.currentSpec.id);
             this.ikSys.gripperSiteId = -1; 
             this.gripperActuatorId = -1;
+
             for (let i = 0; i < this.mjModel.nsite; i++) {
-                 if (getName(this.mjModel, this.mjModel.name_siteadr[i]).includes('tcp')) { 
-                     this.ikSys.gripperSiteId = i; break; 
+                 const siteName = getName(this.mjModel, this.mjModel.name_siteadr[i]).toLowerCase();
+                 if (siteName === 'tcp') { 
+                     this.ikSys.gripperSiteId = i; 
+                     break; 
                  }
             }
+            if (this.ikSys.gripperSiteId === -1) {
+                for (let i = 0; i < this.mjModel.nsite; i++) {
+                     const siteName = getName(this.mjModel, this.mjModel.name_siteadr[i]).toLowerCase();
+                     if (siteName.includes('tcp') || siteName.includes('attachment_site')) { 
+                         this.ikSys.gripperSiteId = i; 
+                         break; 
+                     }
+                }
+            }
+
             for (let i = 0; i < this.mjModel.nu; i++) {
-                 if (getName(this.mjModel, this.mjModel.name_actuatoradr[i]).includes('gripper')) { 
-                     this.gripperActuatorId = i; break; 
+                 const actName = getName(this.mjModel, this.mjModel.name_actuatoradr[i]).toLowerCase();
+                 if (actName.includes('gripper') || actName.includes('finger')) { 
+                     this.gripperActuatorId = i; 
+                     break; 
                  }
             }
 
@@ -100,12 +123,12 @@ export class MujocoSim {
             this.ikSys.init(this.mjModel, isDouble);
             this.ikSys.syncToSite(this.mjData!);
             
-            this.ikSys.target.quaternion.setFromEuler(new THREE.Euler(Math.PI, 0, 0));
-            this.ikSys.target.position.set(0, 0, 0.45);
-
-            this.firstIkEnable = true;
-            
-            this.sequenceAnimator.init(this.mjModel, isStacking, (addr) => getName(this.mjModel!, addr));
+            this.sequenceAnimator.init(
+                this.mjModel, 
+                isStacking, 
+                (addr) => getName(this.mjModel!, addr),
+                this.currentSpec
+            );
             
             this.startLoop();
         }
@@ -113,16 +136,14 @@ export class MujocoSim {
     
     private setInitialPose() {
         if (!this.mjModel || !this.mjData) return;
-        const initVals = [1.707, -1.754, 0.003, -2.702, 0.003, 0.951, 2.490, 0.000];
+        const initVals = this.currentSpec.initialJoints;
         
         for (let i = 0; i < Math.min(initVals.length, this.mjModel.nu); i++) {
             this.mjData.ctrl[i] = initVals[i];
-            if (this.mjModel.actuator_trnid[2 * i + 1] === 1) {
-                const jointId = this.mjModel.actuator_trnid[2 * i];
-                if (jointId >= 0 && jointId < this.mjModel.njnt) {
-                    const qposAdr = this.mjModel.jnt_qposadr[jointId];
-                    this.mjData.qpos[qposAdr] = initVals[i];
-                }
+            const jointId = this.mjModel.actuator_trnid[2 * i];
+            if (jointId >= 0 && jointId < this.mjModel.njnt) {
+                const qposAdr = this.mjModel.jnt_qposadr[jointId];
+                this.mjData.qpos[qposAdr] = initVals[i];
             }
         }
     }
@@ -310,10 +331,6 @@ export class MujocoSim {
         this.randomizeCubes(); 
         this.mujoco.mj_forward(this.mjModel, this.mjData); 
         this.ikSys.syncToSite(this.mjData);
-        
-        this.ikSys.target.quaternion.setFromEuler(new THREE.Euler(Math.PI, 0, 0));
-        this.ikSys.target.position.set(0, 0, 0.45);
-        this.firstIkEnable = true;
     }
     
     togglePause() { return this.paused = !this.paused; }
@@ -322,13 +339,7 @@ export class MujocoSim {
         this.userIkEnabled = enabled;
         this.syncIkState();
         if (enabled && this.mjData && !this.gizmoAnim.active && !this.sequenceAnimator.running) {
-            if (this.firstIkEnable) {
-                this.ikSys.target.quaternion.setFromEuler(new THREE.Euler(Math.PI, 0, 0));
-                this.ikSys.target.position.set(0, 0, 0.45);
-                this.firstIkEnable = false;
-            } else {
-                this.ikSys.syncToSite(this.mjData);
-            }
+            this.ikSys.syncToSite(this.mjData);
         }
     }
     
