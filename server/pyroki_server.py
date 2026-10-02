@@ -101,6 +101,37 @@ class RobotModelContext:
         _sol.block_until_ready()
         print(f"[{self.robot_id}] JIT Warmup complete in {time.time() - t0:.2f}s! Initial pos err: {float(_perr)*1000:.2f}mm")
 
+def evaluate_posture(q_arr: np.ndarray, target_pos: jax.Array, current_q: jax.Array, robot_id: str) -> float:
+    if robot_id != "ur5e":
+        return float(np.linalg.norm(q_arr[:len(current_q)] - np.array(current_q)))
+        
+    azimuth = float(np.arctan2(float(target_pos[1]), float(target_pos[0])))
+    # Cosine of difference between shoulder pan and target direction (+1 if facing target, -1 if opposite)
+    pan_alignment = float(np.cos(float(q_arr[0]) - azimuth))
+    
+    score = 0.0
+    # 1. Heavy penalty if shoulder faces opposite direction (pan_alignment < 0.2)
+    if pan_alignment < 0.2:
+        score += 200.0 * (0.2 - pan_alignment)
+        
+    # 2. Heavy penalty for elbow up / obtuse upward angle (q[2] < 1.1 rad)
+    if float(q_arr[2]) < 1.1:
+        score += 100.0 * (1.1 - float(q_arr[2]))
+        
+    # 3. Penalty for shoulder lift leaning over backwards (q[1] < -2.7 rad)
+    if float(q_arr[1]) < -2.7:
+        score += 50.0 * (-2.7 - float(q_arr[1]))
+        
+    # 4. Penalty for wrist 1 pointing upwards (q[3] > 0.0 rad)
+    if float(q_arr[3]) > 0.0:
+        score += 50.0 * float(q_arr[3])
+        
+    # 5. Smooth trajectory distance from current joint posture
+    continuity = float(np.linalg.norm(q_arr[:len(current_q)] - np.array(current_q)))
+    score += continuity
+    
+    return score
+
 # Preload supported manipulators
 ROBOT_REGISTRY: Dict[str, RobotModelContext] = {}
 
@@ -216,29 +247,64 @@ def solve_ik(req: IKRequest):
             q_curr = q_curr[:total_actuated]
             
         current_q = jnp.array(q_curr, dtype=jnp.float32)
-        
-        # 1st attempt: solve from current joint posture for trajectory continuity
-        sol, pos_err_jnp, rot_err_jnp = ctx._solve_fn(pos_link, wxyz, current_q, current_q)
-        sol.block_until_ready()
-        pos_err = float(pos_err_jnp)
-        rot_err = float(rot_err_jnp)
-        
+
         # Physical tolerances for robotic manipulation
-        POS_TOLERANCE_M = 0.030 # 30 mm
-        ROT_TOLERANCE_RAD = 0.40
-
-        # 2nd attempt: if local minimum or joint limits trapped optimizer, restart from home pose
-        if pos_err > POS_TOLERANCE_M:
-            sol_home, pos_err_home_jnp, rot_err_home_jnp = ctx._solve_fn(pos_link, wxyz, current_q, ctx.q_home)
-            sol_home.block_until_ready()
-            pos_err_home = float(pos_err_home_jnp)
-            rot_err_home = float(rot_err_home_jnp)
-            if pos_err_home < pos_err:
-                sol, pos_err, rot_err = sol_home, pos_err_home, rot_err_home
-
-        elapsed_ms = (time.time() - t_start) * 1000.0
-        is_success = (pos_err <= POS_TOLERANCE_M) and (rot_err <= ROT_TOLERANCE_RAD)
+        POS_TOLERANCE_M = 0.001  # 1 mm
+        ROT_TOLERANCE_RAD = 0.40  # ~23 deg
         
+        # Multi-start candidate solving with natural posture scoring
+        candidates = []
+        
+        # Determine natural posture seed
+        if robot_id == "ur5e":
+            target_azimuth = float(np.arctan2(float(pos_link[1]), float(pos_link[0])))
+            # Natural forward-facing seed: shoulder pan tracks target azimuth, elbow is bent down
+            q_natural = jnp.array([target_azimuth, -1.8, 1.8, -1.5708, -1.5708, 0.0], dtype=jnp.float32)
+            
+            # Seeds to try:
+            # 1. Start from natural forward posture seed (strongly anchored to natural forward branch)
+            # 2. Warm start from current posture (rest_pose anchored to natural posture)
+            # 3. Start from robot default home posture
+            seeds_to_try = [
+                (q_natural, q_natural),
+                (current_q, q_natural),
+                (ctx.q_home, q_natural),
+            ]
+        else:
+            seeds_to_try = [
+                (current_q, current_q),
+                (ctx.q_home, ctx.q_home),
+            ]
+
+        for init_seed, rest_seed in seeds_to_try:
+            sol_cand, pos_err_jnp, rot_err_jnp = ctx._solve_fn(pos_link, wxyz, rest_seed, init_seed)
+            sol_cand.block_until_ready()
+            pos_err_cand = float(pos_err_jnp)
+            rot_err_cand = float(rot_err_jnp)
+            
+            if pos_err_cand <= POS_TOLERANCE_M and rot_err_cand <= ROT_TOLERANCE_RAD:
+                q_arr = np.array(sol_cand)
+                score = evaluate_posture(q_arr, pos_link, current_q, robot_id)
+                candidates.append((score, sol_cand, pos_err_cand, rot_err_cand))
+                # If we got a near-zero penalty natural solution, we can stop early
+                if score < 1.0:
+                    break
+
+        if len(candidates) > 0:
+            # Sort by score (lowest penalty first)
+            candidates.sort(key=lambda c: c[0])
+            best_score, sol, pos_err, rot_err = candidates[0]
+            is_success = True
+        else:
+            # Fallback: solve from home or current
+            sol, pos_err_jnp, rot_err_jnp = ctx._solve_fn(pos_link, wxyz, current_q, current_q)
+            sol.block_until_ready()
+            pos_err = float(pos_err_jnp)
+            rot_err = float(rot_err_jnp)
+            is_success = (pos_err <= POS_TOLERANCE_M) and (rot_err <= ROT_TOLERANCE_RAD)
+        
+        elapsed_ms = (time.time() - t_start) * 1000.0
+
         if is_success:
             solved_joints = [float(x) for x in sol[:ctx.arm_dof]]
             return IKResponse(
