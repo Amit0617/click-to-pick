@@ -64,7 +64,7 @@ export class MujocoSim {
         
         this.ikSys = new IkSystem(this.mujoco, this.renderSys.camera, this.renderSys.renderer.domElement, this.renderSys.controls);
         this.renderSys.simGroup.add(this.ikSys.target); 
-        this.renderSys.scene.add(this.ikSys.control as unknown as THREE.Object3D);
+        this.renderSys.scene.add(this.ikSys.control.getHelper());
         
         this.sequenceAnimator = new SequenceAnimator();
         
@@ -233,8 +233,14 @@ export class MujocoSim {
                     this.sequenceAnimator.update((1/60) * this.speedMultiplier, this.ikSys.target, this.mjData, this.gripperActuatorId, this.ikSys);
                     this.setIkEnabled(false);
                 } else {
-                     this.syncIkState();
-                     this.ikSys.update(this.mjModel, this.mjData);
+                    this.syncIkState();
+                    if (this.userIkEnabled) {
+                        this.ikSys.update(this.mjModel, this.mjData);
+                    } 
+                    else if (!this.gizmoAnim.active) {
+                        // When IK target is not being dragged by user, keep it continuously aligned to the physical TCP site
+                        this.ikSys.syncToSite(this.mjData);
+                    }
                 }
 
                 const startSimTime = this.mjData.time;

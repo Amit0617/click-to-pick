@@ -47,6 +47,7 @@ export class IkSystem {
     onSolveCallback: ((stats: IkSolveStats) => void) | null = null;
 
     private isAsyncSolving = false;
+    private lastRequestedTarget: { position: THREE.Vector3; quaternion: THREE.Quaternion } | null = null;
     private qNeutral = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]; // Preferred "home" pose
     
     // Joint 7 parameters for redundancy resolution in Franka analytical solver
@@ -295,8 +296,16 @@ export class IkSystem {
         for (let i = 0; i < this.dof; i++) currentQ.push(mjData.qpos[i]);
 
         if (this.solverType === 'pyroki') {
-            if (!this.isAsyncSolving) {
+            const targetChanged = !this.lastRequestedTarget
+                || this.target.position.distanceToSquared(this.lastRequestedTarget.position) > 1e-6
+                || this.target.quaternion.angleTo(this.lastRequestedTarget.quaternion) > 0.01;
+
+            if (!this.isAsyncSolving && targetChanged) {
                 this.isAsyncSolving = true;
+                this.lastRequestedTarget = {
+                    position: this.target.position.clone(),
+                    quaternion: this.target.quaternion.clone()
+                };
                 this.solvePyroki(this.target.position, this.target.quaternion, currentQ)
                     .then((solution) => {
                         if (solution) {
@@ -325,8 +334,8 @@ export class IkSystem {
     }
     
     setGizmoVisible(visible: boolean) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (this.control as any).visible = this.control.enabled = visible;
+        this.control.getHelper().visible = visible;
+        this.control.enabled = visible;
     }
     
     setTargetVisible(visible: boolean) {

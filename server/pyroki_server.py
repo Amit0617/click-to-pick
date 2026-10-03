@@ -157,7 +157,7 @@ try:
         target_link_candidates=["tool0", "wrist_3_link", "flange"],
         q_home=[1.5, -2.2708, 2.2708, -1.5708, -1.5708, 0.0],
         arm_dof=6,
-        tcp_offset=0.135
+        tcp_offset=0.165  # a little more than the Robotiq 2F-85 gripper length to account for the TCP being at the tip of the fingers
     )
     ur5e_ctx.warmup()
     ROBOT_REGISTRY["ur5e"] = ur5e_ctx
@@ -250,7 +250,7 @@ def solve_ik(req: IKRequest):
 
         # Physical tolerances for robotic manipulation
         POS_TOLERANCE_M = 0.001  # 1 mm
-        ROT_TOLERANCE_RAD = 0.40  # ~23 deg
+        ROT_TOLERANCE_RAD = 0.017  # ~1 deg
         
         # Multi-start candidate solving with natural posture scoring
         candidates = []

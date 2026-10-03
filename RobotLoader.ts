@@ -3,40 +3,63 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ROBOT_CONFIGS } from "./robots";
+import { ROBOT_CONFIGS, RobotSpec } from "./robots";
 import { MujocoModule } from "./types";
 
-const ROBOTIQ_MESH_FILES = [
-    'base_mount.stl',
-    'base.stl',
-    'driver.stl',
-    'coupler.stl',
-    'follower.stl',
-    'pad.stl',
-    'silicone_pad.stl',
-    'spring_link.stl'
-];
+/**
+ * Helper to get direct child elements with optional tagName filter
+ */
+function getDirectElements(el: Element, tagName?: string): Element[] {
+    const res: Element[] = [];
+    if (!el || !el.childNodes) return res;
+    for (let i = 0; i < el.childNodes.length; i++) {
+        const node = el.childNodes[i];
+        if (node.nodeType === 1) { // ELEMENT_NODE
+            const elem = node as Element;
+            if (!tagName || elem.tagName.toLowerCase() === tagName.toLowerCase()) {
+                res.push(elem);
+            }
+        }
+    }
+    return res;
+}
+
+/**
+ * Helper to find descendant element matching tag and optional attribute
+ */
+function findElement(root: Document | Element, tagName: string, attrName?: string, attrVal?: string): Element | null {
+    if (!root) return null;
+    const elements = root.getElementsByTagName(tagName);
+    for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        if (!attrName || el.getAttribute(attrName) === attrVal) {
+            return el;
+        }
+    }
+    return null;
+}
 
 /**
  * RobotLoader
- * Handles fetching robot XML files and their dependencies (meshes, textures) from remote URLs.
- * It writes these files into MuJoCo's in-memory virtual filesystem so the C++ engine can read them.
+ * Handles dynamically fetching robot and gripper XML files and their dependencies (meshes, textures)
+ * from remote repositories at loading time, attaching grippers to manipulators via structured DOM logic,
+ * and populating MuJoCo's in-memory virtual filesystem.
  */
 export class RobotLoader {
     private mujoco: MujocoModule;
+    private cachedGripperXml: string | null = null;
+    private downloadedGripperAssets = new Set<string>();
 
     constructor(mujocoInstance: MujocoModule) {
         this.mujoco = mujocoInstance;
     }
 
     /**
-     * Main entry point. Downloads the main scene XML and recursively finds/downloads all included files.
-     * @param robotId Target robot identifier (e.g. 'franka_panda' or 'ur5e')
-     * @param sceneFile Scene XML filename (default 'scene.xml')
-     * @param onProgress Optional callback to report loading progress string.
+     * Main entry point. Downloads the main scene XML and recursively finds/downloads all dependencies.
+     * If a gripper is specified, downloads its XML and referenced assets at loading time and attaches it.
      */
     async load(robotId: string, sceneFile = 'scene.xml', onProgress?: (msg: string) => void): Promise<{ isDouble: boolean, isStacking: boolean }> {
-        // 1. Clean up the virtual filesystem from previous runs
+        // 1. Clean up virtual filesystem from previous runs
         try { this.mujoco.FS.unmount('/working'); } catch (e) { /* ignore */ }
         try { this.mujoco.FS.mkdir('/working'); } catch (e) { /* ignore */ }
         try { this.mujoco.FS.mkdir('/working/assets'); } catch (e) { /* ignore */ }
@@ -48,25 +71,11 @@ export class RobotLoader {
         const menagerieRepo = spec.menageriePath;
         const baseUrl = `https://raw.githubusercontent.com/google-deepmind/mujoco_menagerie/main/${menagerieRepo}/`;
 
-        // If UR5e, pre-download all Robotiq 2F-85 meshes directly into /working/assets
-        // from their correct upstream repository (robotiq_2f85)
-        if (spec.id === 'ur5e') {
-            const robotiqBase = 'https://raw.githubusercontent.com/google-deepmind/mujoco_menagerie/main/robotiq_2f85/assets/';
-            if (onProgress) onProgress('Loading Robotiq 2F-85 gripper meshes...');
-            
-            await Promise.all(ROBOTIQ_MESH_FILES.map(async (meshFile) => {
-                try {
-                    const res = await fetch(robotiqBase + meshFile);
-                    if (res.ok) {
-                        const buffer = new Uint8Array(await res.arrayBuffer());
-                        this.mujoco.FS.writeFile(`/working/assets/${meshFile}`, buffer);
-                    } else {
-                        console.warn(`Could not load Robotiq mesh ${meshFile}: ${res.status}`);
-                    }
-                } catch (e) {
-                    console.warn(`Network error downloading Robotiq mesh ${meshFile}:`, e);
-                }
-            }));
+        // 2. If robot config specifies a gripper, dynamically fetch gripper XML & its assets at loading time
+        this.cachedGripperXml = null;
+        this.downloadedGripperAssets.clear();
+        if (spec.gripperMenageriePath) {
+            this.cachedGripperXml = await this.downloadGripperAssets(spec, onProgress);
         }
 
         const downloaded = new Set<string>();
@@ -115,7 +124,7 @@ export class RobotLoader {
             // If it's an XML, patch it and scan for more dependencies
             if (fname.endsWith('.xml')) {
                 let text = await res.text();
-                text = this.patchRobotXml(fname, sceneFile, spec.id, text);
+                text = this.patchRobotXml(fname, sceneFile, spec, text);
                 
                 // Write text file to virtual FS
                 this.mujoco.FS.writeFile(`/working/${fname}`, text);
@@ -131,9 +140,61 @@ export class RobotLoader {
     }
 
     /**
-     * Modifies standard XMLs to add demo objects (cubes, tray) and configure TCP sites/actuators.
+     * Downloads the gripper XML and all assets referenced by it at loading time.
      */
-    private patchRobotXml(fname: string, sceneFile: string, robotId: string, text: string): string {
+    private async downloadGripperAssets(spec: RobotSpec, onProgress?: (msg: string) => void): Promise<string | null> {
+        if (!spec.gripperMenageriePath) return null;
+        const repo = spec.gripperMenageriePath;
+        const xmlFile = spec.gripperXmlFile || '2f85.xml';
+        const gripperXmlUrl = `https://raw.githubusercontent.com/google-deepmind/mujoco_menagerie/main/${repo}/${xmlFile}`;
+
+        if (onProgress) onProgress(`Fetching ${xmlFile}...`);
+        const res = await fetch(gripperXmlUrl);
+        if (!res.ok) {
+            console.warn(`Failed to fetch gripper XML from ${gripperXmlUrl}: ${res.status}`);
+            return null;
+        }
+
+        const gripperXmlText = await res.text();
+        const parser = new DOMParser();
+        const gripperDoc = parser.parseFromString(gripperXmlText, 'text/xml');
+
+        // Dynamically find all asset files (meshes, textures) referenced by the gripper XML
+        const assetFiles = new Set<string>();
+        gripperDoc.querySelectorAll('[file]').forEach(el => {
+            const f = el.getAttribute('file');
+            if (f) assetFiles.add(f);
+        });
+
+        if (onProgress && assetFiles.size > 0) {
+            onProgress(`Loading ${spec.shortName} gripper assets (${assetFiles.size} meshes)...`);
+        }
+
+        const assetsBaseUrl = `https://raw.githubusercontent.com/google-deepmind/mujoco_menagerie/main/${repo}/assets/`;
+
+        await Promise.all(Array.from(assetFiles).map(async (meshFile) => {
+            try {
+                const r = await fetch(assetsBaseUrl + meshFile);
+                if (r.ok) {
+                    const buffer = new Uint8Array(await r.arrayBuffer());
+                    this.mujoco.FS.writeFile(`/working/assets/${meshFile}`, buffer);
+                    this.downloadedGripperAssets.add(meshFile);
+                } else {
+                    console.warn(`Could not load gripper mesh ${meshFile}: ${r.status}`);
+                }
+            } catch (e) {
+                console.warn(`Network error downloading gripper asset ${meshFile}:`, e);
+            }
+        }));
+
+        return gripperXmlText;
+    }
+
+    /**
+     * Modifies standard XMLs to add demo objects (cubes, tray) and configure TCP sites/actuators.
+     * When a gripper is cached, attaches it to the manipulator's attachment site.
+     */
+    private patchRobotXml(fname: string, sceneFile: string, spec: RobotSpec, text: string): string {
         // 1. Inject Table, Tray & Stacking Cubes into scene.xml for the unified picking environment
         if (fname === sceneFile) {
             let injection = '';
@@ -197,76 +258,249 @@ export class RobotLoader {
         }
 
         // 2. Franka Panda specific patches: ensure TCP site and named gripper actuator
-        if (robotId === 'franka_panda' && fname.endsWith('panda.xml')) {
+        if (spec.id === 'franka_panda' && fname.endsWith('panda.xml')) {
             text = text
                 .replace(/(<body[^>]*name=["']hand["'][^>]*>)/, '$1<site name="tcp" pos="0 0 0.10" size="0.01" rgba="1 0 0 0.5" group="1"/>')
                 .replace(/name=["']actuator8["']/, 'name="gripper"');
         }
 
-        // 3. Universal Robots UR5e specific patches: align base to forward (+X) and attach parallel Robotiq 2F-85 gripper
-        if (robotId === 'ur5e' && fname.endsWith('ur5e.xml')) {
-            // Align base with standard world forward coordinates (+X forward, matching ROS / PyRoKi)
-            text = text.replace('<body name="base" quat="0 0 0 -1"', '<body name="base" quat="1 0 0 0"');
+        // 3. Attach Gripper to Manipulator (e.g. Robotiq 2F-85 onto Universal Robots UR5e)
+        if (spec.gripperMenageriePath && this.cachedGripperXml && fname.endsWith(spec.id + '.xml')) {
+            // Ensure base coordinates align with standard forward (+X forward, matching ROS / PyRoKi)
+            if (spec.id === 'ur5e') {
+                text = text.replace('<body name="base" quat="0 0 0 -1"', '<body name="base" quat="1 0 0 0"');
+            }
 
-            // Include Robotiq meshes & materials into asset
-            // Note: Robotiq Menagerie STL meshes are in millimeters, so scale="0.001 0.001 0.001" is mandatory
-            const robotiqAssets = `
-    <material name="metal" rgba="0.58 0.58 0.58 1"/>
-    <material name="silicone" rgba="0.1882 0.1882 0.1882 1"/>
-    <material name="gray" rgba="0.4627 0.4627 0.4627 1"/>
-    <mesh file="base_mount.stl" scale="0.001 0.001 0.001"/>
-    <mesh file="base.stl" scale="0.001 0.001 0.001"/>
-    <mesh file="driver.stl" scale="0.001 0.001 0.001"/>
-    <mesh file="coupler.stl" scale="0.001 0.001 0.001"/>
-    <mesh file="follower.stl" scale="0.001 0.001 0.001"/>
-    <mesh file="pad.stl" scale="0.001 0.001 0.001"/>
-    <mesh file="silicone_pad.stl" scale="0.001 0.001 0.001"/>
-    <mesh file="spring_link.stl" scale="0.001 0.001 0.001"/>
-            `;
-            text = text.replace('</asset>', robotiqAssets + '</asset>');
-
-            // Attach Robotiq gripper geometry and TCP site onto wrist_3_link
-            // Prismatic slide joints provide authentic horizontal parallel motion (85 mm stroke)
-            const gripperMount = `
-                  <body name="robotiq_mount" pos="0 0.1 0" quat="-1 1 0 0">
-                    <geom mesh="base_mount" class="visual" material="black"/>
-                    <body name="robotiq_base" pos="0 0 0.0038" quat="1 0 0 -1">
-                      <geom mesh="base" class="visual" material="black"/>
-                      <body name="left_finger" pos="0 -0.012 0.06">
-                        <joint name="finger_joint1" type="slide" axis="0 -1 0" range="0 0.0425" damping="20"/>
-                        <geom type="box" size="0.012 0.006 0.04" pos="0 -0.006 0.02" rgba="0.25 0.25 0.25 1" mass="0.05"/>
-                        <geom type="box" size="0.011 0.004 0.025" pos="0 0.002 0.055" rgba="0.15 0.15 0.15 1" friction="2.0 0.1 0.001" solref="0.01 1" solimp="0.95 0.99 0.001" condim="4" mass="0.02"/>
-                      </body>
-                      <body name="right_finger" pos="0 0.012 0.06">
-                        <joint name="finger_joint2" type="slide" axis="0 1 0" range="0 0.0425" damping="20"/>
-                        <geom type="box" size="0.012 0.006 0.04" pos="0 0.006 0.02" rgba="0.25 0.25 0.25 1" mass="0.05"/>
-                        <geom type="box" size="0.011 0.004 0.025" pos="0 -0.002 0.055" rgba="0.15 0.15 0.15 1" friction="2.0 0.1 0.001" solref="0.01 1" solimp="0.95 0.99 0.001" condim="4" mass="0.02"/>
-                      </body>
-                      <!-- Dedicated TCP center site between gripper finger pads for IK tracking -->
-                      <site name="tcp" pos="0 0 0.135" size="0.01" rgba="1 0 0 0.5" group="1"/>
-                    </body>
-                  </body>
-            `;
-            
-            // Insert gripper mount into wrist_3_link
-            text = text.replace(/(<site name="attachment_site"[^>]*\/>)/, '$1\n' + gripperMount);
-
-            // Couple both fingers symmetrically via equality constraint
-            const equality = `
-    <equality>
-      <joint joint1="finger_joint1" joint2="finger_joint2" polycoef="0 1 0 0 0"/>
-    </equality>
-            `;
-            text = text.replace('</mujoco>', equality + '</mujoco>');
-
-            // Coupled position actuator driving both symmetric fingers horizontally
-            const gripperActuator = `
-    <position name="gripper" joint="finger_joint1" ctrlrange="0 0.0425" kp="800" kv="50" forcerange="-100 100"/>
-            `;
-            text = text.replace('</actuator>', gripperActuator + '</actuator>');
+            // Cleanly attach gripper to manipulator's attachment site using structured DOM operations
+            text = this.attachGripperToManipulator(
+                text, 
+                this.cachedGripperXml, 
+                spec.attachmentSiteName || 'attachment_site'
+            );
         }
 
         return text;
+    }
+
+    /**
+     * Attaches an independently defined gripper model onto the manipulator's attachment site
+     * using standard DOM tree operations to merge defaults, assets, worldbody bodies, contacts,
+     * tendons, equality constraints, and actuators.
+     */
+    private attachGripperToManipulator(robotXmlStr: string, gripperXmlStr: string, attachmentSiteName = "attachment_site"): string {
+        const parser = new DOMParser();
+        const serializer = new XMLSerializer();
+
+        const robotDoc = parser.parseFromString(robotXmlStr, "text/xml");
+        const gripperDoc = parser.parseFromString(gripperXmlStr, "text/xml");
+
+        const robotMujoco = robotDoc.getElementsByTagName("mujoco")[0];
+        const gripperMujoco = gripperDoc.getElementsByTagName("mujoco")[0];
+
+        if (!robotMujoco || !gripperMujoco) {
+            throw new Error("Invalid MJCF XML structure");
+        }
+
+        // Ensure class names don't collide with existing robot classes (e.g. 'visual', 'collision')
+        const existingClasses = new Set<string>();
+        const robotDefaultTags = robotDoc.getElementsByTagName("default");
+        for (let i = 0; i < robotDefaultTags.length; i++) {
+            const cls = robotDefaultTags[i].getAttribute("class");
+            if (cls) existingClasses.add(cls);
+        }
+
+        // If 'visual' already exists in the robot model, prefix gripper's visual class
+        if (existingClasses.has("visual")) {
+            const gripperVisuals = gripperDoc.getElementsByTagName("default");
+            for (let i = 0; i < gripperVisuals.length; i++) {
+                if (gripperVisuals[i].getAttribute("class") === "visual") {
+                    gripperVisuals[i].setAttribute("class", "2f85_visual");
+                }
+            }
+            const geoms = gripperDoc.getElementsByTagName("geom");
+            for (let i = 0; i < geoms.length; i++) {
+                if (geoms[i].getAttribute("class") === "visual") {
+                    geoms[i].setAttribute("class", "2f85_visual");
+                }
+            }
+        }
+
+        // If 'collision' already exists in the robot model, prefix gripper's collision class
+        if (existingClasses.has("collision")) {
+            const gripperCols = gripperDoc.getElementsByTagName("default");
+            for (let i = 0; i < gripperCols.length; i++) {
+                if (gripperCols[i].getAttribute("class") === "collision") {
+                    gripperCols[i].setAttribute("class", "2f85_collision");
+                }
+            }
+            const geoms = gripperDoc.getElementsByTagName("geom");
+            for (let i = 0; i < geoms.length; i++) {
+                if (geoms[i].getAttribute("class") === "collision") {
+                    geoms[i].setAttribute("class", "2f85_collision");
+                }
+            }
+        }
+
+        // 1. Merge <default>
+        let robotDefault = getDirectElements(robotMujoco, "default")[0];
+        if (!robotDefault) {
+            robotDefault = robotDoc.createElement("default");
+            robotMujoco.insertBefore(robotDefault, robotMujoco.firstChild);
+        }
+        const gripperDefault = getDirectElements(gripperMujoco, "default")[0];
+        if (gripperDefault) {
+            const defChildren = getDirectElements(gripperDefault);
+            defChildren.forEach(child => {
+                robotDefault.appendChild(robotDoc.importNode(child, true));
+            });
+        }
+
+        // 2. Merge <asset>
+        let robotAsset = getDirectElements(robotMujoco, "asset")[0];
+        if (!robotAsset) {
+            robotAsset = robotDoc.createElement("asset");
+            robotMujoco.appendChild(robotAsset);
+        }
+        const gripperAsset = getDirectElements(gripperMujoco, "asset")[0];
+        if (gripperAsset) {
+            const assetChildren = getDirectElements(gripperAsset);
+            assetChildren.forEach(child => {
+                const name = child.getAttribute("name");
+                const file = child.getAttribute("file");
+                if (name && findElement(robotAsset, child.tagName, "name", name)) return;
+                if (file && findElement(robotAsset, child.tagName, "file", file)) return;
+                robotAsset.appendChild(robotDoc.importNode(child, true));
+            });
+        }
+
+        // 3. Find attachment site in robot worldbody
+        const attachmentSite = findElement(robotDoc, "site", "name", attachmentSiteName) || findElement(robotDoc, "site", "name", "tcp");
+        if (!attachmentSite || !attachmentSite.parentNode) {
+            throw new Error(`Attachment site '${attachmentSiteName}' not found in robot model`);
+        }
+
+        const parentBody = attachmentSite.parentNode as Element;
+        const sitePos = attachmentSite.getAttribute("pos") || "0 0 0";
+        const siteQuat = attachmentSite.getAttribute("quat") || "1 0 0 0";
+
+        // 4. Attach Gripper root body from gripper worldbody
+        const gripperWorldbody = getDirectElements(gripperMujoco, "worldbody")[0];
+        if (!gripperWorldbody) {
+            throw new Error("No worldbody found in gripper XML");
+        }
+        const gripperRootBodies = getDirectElements(gripperWorldbody, "body");
+        if (gripperRootBodies.length === 0) {
+            throw new Error("No root body found in gripper worldbody");
+        }
+        const gripperRootBody = gripperRootBodies[0];
+        const importedGripperBody = robotDoc.importNode(gripperRootBody, true) as Element;
+        
+        // Position gripper at attachment site
+        importedGripperBody.setAttribute("pos", sitePos);
+        importedGripperBody.setAttribute("quat", siteQuat);
+
+        // Rename internal "base" body to "robotiq_base" to avoid collision with robot pedestal "base"
+        const internalBodies = importedGripperBody.getElementsByTagName("body");
+        for (let i = 0; i < internalBodies.length; i++) {
+            if (internalBodies[i].getAttribute("name") === "base") {
+                internalBodies[i].setAttribute("name", "robotiq_base");
+            }
+        }
+        if (importedGripperBody.getAttribute("name") === "base") {
+            importedGripperBody.setAttribute("name", "robotiq_base");
+        }
+
+        // Add dedicated TCP site if not present for inverse kinematics tracking
+        if (!findElement(importedGripperBody, "site", "name", "tcp")) {
+            const tcpSite = robotDoc.createElement("site");
+            tcpSite.setAttribute("name", "tcp");
+            tcpSite.setAttribute("pos", "0 0 0.145"); // as per Robotiq 2F-85 in MuJoCo menagerie
+            tcpSite.setAttribute("size", "0.01");
+            tcpSite.setAttribute("rgba", "1 0 0 0.5");
+            tcpSite.setAttribute("group", "1");
+            importedGripperBody.appendChild(tcpSite);
+        }
+
+        parentBody.appendChild(importedGripperBody);
+
+        // Helper to insert section before <actuator> or at end of <mujoco>
+        const insertBeforeActuator = (newSection: Element) => {
+            const actuator = getDirectElements(robotMujoco, "actuator")[0];
+            if (actuator) {
+                robotMujoco.insertBefore(newSection, actuator);
+            } else {
+                robotMujoco.appendChild(newSection);
+            }
+        };
+
+        // 5. Merge <contact>
+        const gripperContact = getDirectElements(gripperMujoco, "contact")[0];
+        if (gripperContact) {
+            let robotContact = getDirectElements(robotMujoco, "contact")[0];
+            if (!robotContact) {
+                robotContact = robotDoc.createElement("contact");
+                insertBeforeActuator(robotContact);
+            }
+            const contactChildren = getDirectElements(gripperContact);
+            contactChildren.forEach(child => {
+                const imp = robotDoc.importNode(child, true) as Element;
+                if (imp.getAttribute("body1") === "base") imp.setAttribute("body1", "robotiq_base");
+                if (imp.getAttribute("body2") === "base") imp.setAttribute("body2", "robotiq_base");
+                robotContact.appendChild(imp);
+            });
+        }
+
+        // 6. Merge <tendon>
+        const gripperTendon = getDirectElements(gripperMujoco, "tendon")[0];
+        if (gripperTendon) {
+            let robotTendon = getDirectElements(robotMujoco, "tendon")[0];
+            if (!robotTendon) {
+                robotTendon = robotDoc.createElement("tendon");
+                insertBeforeActuator(robotTendon);
+            }
+            const tendonChildren = getDirectElements(gripperTendon);
+            tendonChildren.forEach(child => {
+                robotTendon.appendChild(robotDoc.importNode(child, true));
+            });
+        }
+
+        // 7. Merge <equality>
+        const gripperEquality = getDirectElements(gripperMujoco, "equality")[0];
+        if (gripperEquality) {
+            let robotEquality = getDirectElements(robotMujoco, "equality")[0];
+            if (!robotEquality) {
+                robotEquality = robotDoc.createElement("equality");
+                insertBeforeActuator(robotEquality);
+            }
+            const eqChildren = getDirectElements(gripperEquality);
+            eqChildren.forEach(child => {
+                robotEquality.appendChild(robotDoc.importNode(child, true));
+            });
+        }
+
+        // 8. Merge <actuator>
+        const gripperActuator = getDirectElements(gripperMujoco, "actuator")[0];
+        if (gripperActuator) {
+            let robotActuator = getDirectElements(robotMujoco, "actuator")[0];
+            if (!robotActuator) {
+                robotActuator = robotDoc.createElement("actuator");
+                robotMujoco.appendChild(robotActuator);
+            }
+            const actChildren = getDirectElements(gripperActuator);
+            actChildren.forEach(act => {
+                const imp = robotDoc.importNode(act, true) as Element;
+                // Standardize actuator name to 'gripper'
+                imp.setAttribute("name", "gripper");
+                // Standardize control: 255 = fully open (0.0 rad), 0 = fully closed (0.8 rad)
+                imp.setAttribute("ctrlrange", "0 255");
+                imp.setAttribute("gainprm", "-0.3137255 0 0");
+                imp.setAttribute("biasprm", "80 -100 -10");
+                imp.setAttribute("forcerange", "-100 100");
+                robotActuator.appendChild(imp);
+            });
+        }
+
+        return serializer.serializeToString(robotDoc);
     }
 
     // Finds all files referenced in the XML so we can download them too
@@ -293,9 +527,8 @@ export class RobotLoader {
             const fileAttr = el.getAttribute('file');
             if (!fileAttr) return;
 
-            // Robotiq meshes are pre-downloaded from their dedicated repository into /working/assets
-            // Do not attempt to re-fetch them from universal_robots_ur5e
-            if (ROBOTIQ_MESH_FILES.includes(fileAttr)) {
+            // Gripper meshes downloaded dynamically into /working/assets
+            if (this.downloadedGripperAssets.has(fileAttr)) {
                 return;
             }
             

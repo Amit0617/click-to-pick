@@ -13,6 +13,8 @@ export interface RobotSpec {
   dof: number;
   menageriePath: string; // Directory in google-deepmind/mujoco_menagerie
   gripperMenageriePath?: string; // Optional gripper repository path
+  gripperXmlFile?: string; // e.g. '2f85.xml'
+  attachmentSiteName?: string; // e.g. 'attachment_site'
   sceneFile: string;
   pyrokiRobotId: string;
   defaultSolver: IkSolverType;
@@ -68,6 +70,8 @@ export const ROBOT_CONFIGS: Record<string, RobotSpec> = {
     dof: 6,
     menageriePath: 'universal_robots_ur5e',
     gripperMenageriePath: 'robotiq_2f85',
+    gripperXmlFile: '2f85.xml',
+    attachmentSiteName: 'attachment_site',
     sceneFile: 'scene.xml',
     pyrokiRobotId: 'ur5e',
     defaultSolver: 'pyroki',
@@ -76,8 +80,8 @@ export const ROBOT_CONFIGS: Record<string, RobotSpec> = {
     homeJoints: [1.5, -2.2708, 2.2708, -1.5708, -1.5708, 0.0],
     tcpSiteName: 'tcp',
     gripperActuatorName: 'gripper',
-    gripperOpenVal: 0.0425,
-    gripperCloseVal: 0.0,
+    gripperOpenVal: 255,
+    gripperCloseVal: 0,
     description: '6-DOF industrial collaborative robot integrated with Robotiq 2F-85 adaptive parallel gripper.',
     badge: '6-DOF Cobot + 2F-85',
     specs: {

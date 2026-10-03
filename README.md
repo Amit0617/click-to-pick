@@ -53,6 +53,31 @@ flowchart LR
             
             C1 ~~~ C2 ~~~ aboveBottomRow ~~~ bottomRow1
         end
+
+        subgraph v3["Robotics simulator in browser v3"]
+            direction TB
+            D1["Loading MuJoCo Wasm as environment"]
+            
+            subgraph belowTop[" "]
+                direction LR
+                D2["Importing a robot (franka panda) in MuJoCo"]
+                D3["Importing UR5e with Robotiq 2f-85 gripper in MuJoCo"]
+            end
+            
+            subgraph aboveBottomRow1[" "]
+                direction LR
+                D4["Implementing Inverse Kinematics (analytical only for franka)"]
+                D5["PyRoKi Fast API backend with generalized IK"]
+            end
+
+            subgraph bottomRow2[" "]
+                direction LR
+                D6["Integrating Gemini<br/>Spatial understanding<br/>(annotates objects in scene)"]
+                D7["Manually Clicking on object to Pick"]
+            end
+            
+            D1 ~~~ belowTop ~~~ aboveBottomRow1 ~~~ bottomRow2
+        end
    end
 
     %% Styles
@@ -61,11 +86,13 @@ flowchart LR
     
     class B5 greenCard;
     class C4 greenCard;
+    class D3 greenCard;
     
     style root fill:none,stroke:none;
     style v0 fill:#F9F9F9,stroke:#E5E5E5,stroke-width:1px,rx:10px;
     style v1 fill:#F9F9F9,stroke:#E5E5E5,stroke-width:1px,rx:10px;
     style v2 fill:#F9F9F9,stroke:#E5E5E5,stroke-width:1px,rx:10px;
+    style v3 fill:#F9F9F9,stroke:#E5E5E5,stroke-width:1px,rx:10px;
 
 ```
 
@@ -89,15 +116,8 @@ npm install
 ```sh
 cd server
 uv sync
-source .venv/bin/activate
-python3 pyroki_server.py
+uv run python pyroki_server.py
 ```
 
 4. Run the app (in another terminal tab):
    `npm run dev`/ `pnpm run dev` at the root of project.
-
-### Run and deploy your AI Studio app
-
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/2dfef720-ed29-44b6-a6dc-7940694b09f5
