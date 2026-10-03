@@ -120,9 +120,28 @@ export function App() {
   const [gizmoStats, setGizmoStats] = useState<{pos: string, rot: string} | null>(null);
   const [ikSolver, setIkSolver] = useState<IkSolverType>('pyroki');
   const [pyrokiAvailable, setPyrokiAvailable] = useState(false);
+  const [loadedRobots, setLoadedRobots] = useState<string[]>([]);
   const [lastSolveStats, setLastSolveStats] = useState<IkSolveStats | null>(null);
 
-  // Probe PyRoKi FastAPI backend health
+  // Syncs active manipulator(s) with PyRoKi backend on-demand (supports 1 or N manipulators)
+  const syncBackendScene = (robotIds: string[]) => {
+    fetch('/api/scene/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ robot_ids: robotIds })
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.status === 'ready' && Array.isArray(data.loaded_robots)) {
+          setLoadedRobots(data.loaded_robots);
+        }
+      })
+      .catch(() => {
+        // Backend offline or non-blocking
+      });
+  };
+
+  // Probe PyRoKi FastAPI backend health and loaded models
   useEffect(() => {
     let active = true;
     const checkHealth = () => {
@@ -131,6 +150,9 @@ export function App() {
         .then((data) => {
           if (active && data.status === 'ok') {
             setPyrokiAvailable(true);
+            if (Array.isArray(data.loaded_robots)) {
+              setLoadedRobots(data.loaded_robots);
+            }
           }
         })
         .catch(() => {
@@ -171,6 +193,9 @@ export function App() {
       targetSolver = spec.defaultSolver;
       setIkSolver(targetSolver);
     }
+
+    // Sync PyRoKi backend on-demand for active scene manipulator(s)
+    syncBackendScene([spec.pyrokiRobotId]);
 
     simRef.current.init(spec.id, spec.sceneFile, (msg) => {
       if (isMounted.current) setLoadingStatus(msg);
@@ -233,6 +258,10 @@ export function App() {
           simRef.current = new MujocoSim(containerRef.current, mujocoModuleRef.current);
           simRef.current.renderSys.setDarkMode(isDarkMode);
           
+          // Sync PyRoKi backend on-demand for active scene manipulator(s)
+          const initialSpec = ROBOT_CONFIGS[selectedRobotId] || ROBOT_CONFIGS.franka_panda;
+          syncBackendScene([initialSpec.pyrokiRobotId]);
+
           simRef.current.init(selectedRobotId, "scene.xml", (msg) => {
              if (isMounted.current) setLoadingStatus(msg);
           })
@@ -659,6 +688,7 @@ export function App() {
           ikSolver={ikSolver}
           setIkSolver={handleSetIkSolver}
           pyrokiAvailable={pyrokiAvailable}
+          loadedRobots={loadedRobots}
           lastSolveStats={lastSolveStats}
         />
       )}

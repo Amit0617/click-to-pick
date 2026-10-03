@@ -14,6 +14,7 @@ interface RobotSelectorProps {
   ikSolver: IkSolverType;
   setIkSolver: (solver: IkSolverType) => void;
   pyrokiAvailable?: boolean;
+  loadedRobots?: string[];
   lastSolveStats?: IkSolveStats | null;
 }
 
@@ -28,6 +29,7 @@ export function RobotSelector({
   ikSolver,
   setIkSolver,
   pyrokiAvailable = false,
+  loadedRobots = [],
   lastSolveStats = null,
 }: RobotSelectorProps) {
   const robot: RobotSpec = ROBOT_CONFIGS[currentRobotId] || ROBOT_CONFIGS.franka_panda;
@@ -38,6 +40,8 @@ export function RobotSelector({
     : 'bg-white/70 border-white/80 text-slate-800 shadow-slate-100/10';
   const labelStyle = 'text-slate-400';
   const valueStyle = isDarkMode ? 'text-slate-300' : 'text-slate-600';
+
+  const isWarmedUp = loadedRobots.includes(robot.pyrokiRobotId);
 
   return (
     <div className="absolute top-20 min-[660px]:top-10 left-1/2 -translate-x-1/2 min-[660px]:left-10 min-[660px]:translate-x-0 z-20 flex flex-col gap-3 pointer-events-auto">
@@ -52,13 +56,21 @@ export function RobotSelector({
               className={`w-1.5 h-1.5 rounded-full ${
                 ikSolver === 'pyroki'
                   ? pyrokiAvailable
-                    ? 'bg-emerald-400 animate-pulse'
-                    : 'bg-amber-400'
+                    ? isWarmedUp
+                      ? 'bg-emerald-400 animate-pulse'
+                      : 'bg-amber-400 animate-pulse'
+                    : 'bg-slate-400'
                   : 'bg-indigo-400'
               }`}
             />
             <span className="text-slate-600 dark:text-slate-300 font-mono text-[9px]">
-              {ikSolver === 'pyroki' ? (pyrokiAvailable ? 'PyRoKi FastAPI' : 'Connecting...') : 'Analytical IK'}
+              {ikSolver === 'pyroki'
+                ? pyrokiAvailable
+                  ? isWarmedUp
+                    ? 'PyRoKi Active'
+                    : 'PyRoKi Ready'
+                  : 'Connecting...'
+                : 'Analytical IK'}
             </span>
           </div>
         </div>

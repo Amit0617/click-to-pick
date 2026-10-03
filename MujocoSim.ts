@@ -123,6 +123,7 @@ export class MujocoSim {
             this.ikSys.init(this.mjModel, isDouble);
             this.ikSys.syncToSite(this.mjData!);
             
+            this.sequenceAnimator.reset();
             this.sequenceAnimator.init(
                 this.mjModel, 
                 isStacking, 

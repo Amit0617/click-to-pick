@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 import jax
 import jax.numpy as jnp
@@ -24,21 +24,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class RobotConfig(BaseModel):
+    robot_id: str
+    description_name: str
+    target_link_candidates: List[str]
+    q_home: List[float]
+    arm_dof: int
+    tcp_offset: float = 0.0
+
+# Declarative registry of supported manipulator topologies.
+# Does NOT warm up at server launch. Models are lazily loaded and JIT-compiled
+# on-demand based on which manipulator(s) are actively loaded into the scene.
+ROBOT_CONFIGS: Dict[str, RobotConfig] = {
+    "franka_panda": RobotConfig(
+        robot_id="franka_panda",
+        description_name="panda_description",
+        target_link_candidates=["panda_hand_tcp", "panda_hand", "panda_link8"],
+        q_home=[1.707, -1.754, 0.003, -2.702, 0.003, 0.951, 2.490, 0.000],
+        arm_dof=7,
+        tcp_offset=0.0
+    ),
+    "ur5e": RobotConfig(
+        robot_id="ur5e",
+        description_name="ur5e_description",
+        target_link_candidates=["tool0", "wrist_3_link", "flange"],
+        q_home=[1.5, -2.2708, 2.2708, -1.5708, -1.5708, 0.0],
+        arm_dof=6,
+        tcp_offset=0.165  # accounts for Robotiq 2F-85 gripper length to TCP at finger pinch center
+    )
+}
+
 class RobotModelContext:
-    def __init__(self, robot_id: str, description_name: str, target_link_candidates: List[str], q_home: List[float], arm_dof: int, tcp_offset: float = 0.0):
-        self.robot_id = robot_id
-        self.description_name = description_name
-        self.arm_dof = arm_dof
-        self.tcp_offset = tcp_offset
-        self.q_home = jnp.array(q_home, dtype=jnp.float32)
+    def __init__(self, config: RobotConfig):
+        self.config = config
+        self.robot_id = config.robot_id
+        self.description_name = config.description_name
+        self.arm_dof = config.arm_dof
+        self.tcp_offset = config.tcp_offset
+        self.q_home = jnp.array(config.q_home, dtype=jnp.float32)
         
-        print(f"[{robot_id}] Loading robot description '{description_name}'...")
-        self.urdf = load_robot_description(description_name)
+        print(f"[{self.robot_id}] Loading robot description '{self.description_name}'...")
+        self.urdf = load_robot_description(self.description_name)
         self.robot = pk.Robot.from_urdf(self.urdf)
         
-        # Find matching target link
+        # Find matching target link from candidate list
         target_name = None
-        for candidate in target_link_candidates:
+        for candidate in config.target_link_candidates:
             if candidate in self.robot.links.names:
                 target_name = candidate
                 break
@@ -48,7 +79,7 @@ class RobotModelContext:
             
         self.target_link_name = target_name
         self.target_link_index = jnp.array(self.robot.links.names.index(target_name))
-        print(f"[{robot_id}] Loaded successfully! Target link '{target_name}' at index {int(self.target_link_index)} (Actuated joints: {self.robot.joints.num_actuated_joints})")
+        print(f"[{self.robot_id}] Loaded successfully! Target link '{target_name}' at index {int(self.target_link_index)} (Actuated joints: {self.robot.joints.num_actuated_joints})")
         
         # Compile solver function for this specific robot topology
         self._build_solver()
@@ -77,7 +108,7 @@ class RobotModelContext:
                 .analyze()
                 .solve(
                     initial_vals=jaxls.VarValues.make([joint_var.with_value(init_q)]),
-                    verbose=False,
+                    verbose=True,
                     linear_solver="dense_cholesky",
                     trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
                 )
@@ -92,14 +123,37 @@ class RobotModelContext:
 
         self._solve_fn = _solve
 
-    def warmup(self):
+    def warmup(self) -> float:
         print(f"[{self.robot_id}] Warming up JAX JIT compilation...")
         t0 = time.time()
         _pos = jnp.array([0.4, 0.0, 0.2], dtype=jnp.float32)
         _wxyz = jnp.array([0.0, 1.0, 0.0, 0.0], dtype=jnp.float32)
         _sol, _perr, _rerr = self._solve_fn(_pos, _wxyz, self.q_home, self.q_home)
         _sol.block_until_ready()
-        print(f"[{self.robot_id}] JIT Warmup complete in {time.time() - t0:.2f}s! Initial pos err: {float(_perr)*1000:.2f}mm")
+        elapsed = time.time() - t0
+        print(f"[{self.robot_id}] JIT Warmup complete in {elapsed:.2f}s! Initial pos err: {float(_perr)*1000:.2f}mm")
+        return elapsed
+
+# Active cache of warmed-up manipulators currently loaded in scene
+LOADED_ROBOTS: Dict[str, RobotModelContext] = {}
+
+def get_or_load_robot(robot_id: str) -> RobotModelContext:
+    """Retrieves an existing loaded robot context, or loads and JIT-warms it up on-demand."""
+    if robot_id in LOADED_ROBOTS:
+        return LOADED_ROBOTS[robot_id]
+        
+    if robot_id not in ROBOT_CONFIGS:
+        available = list(ROBOT_CONFIGS.keys())
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Robot '{robot_id}' is not in configured manipulators. Configured: {available}"
+        )
+        
+    cfg = ROBOT_CONFIGS[robot_id]
+    ctx = RobotModelContext(cfg)
+    ctx.warmup()
+    LOADED_ROBOTS[robot_id] = ctx
+    return ctx
 
 def evaluate_posture(q_arr: np.ndarray, target_pos: jax.Array, current_q: jax.Array, robot_id: str) -> float:
     if robot_id != "ur5e":
@@ -132,37 +186,20 @@ def evaluate_posture(q_arr: np.ndarray, target_pos: jax.Array, current_q: jax.Ar
     
     return score
 
-# Preload supported manipulators
-ROBOT_REGISTRY: Dict[str, RobotModelContext] = {}
+# --- API Models ---
 
-# 1. Franka Panda (7 arm joints + 1 gripper joint)
-try:
-    panda_ctx = RobotModelContext(
-        robot_id="franka_panda",
-        description_name="panda_description",
-        target_link_candidates=["panda_hand_tcp", "panda_hand", "panda_link8"],
-        q_home=[1.707, -1.754, 0.003, -2.702, 0.003, 0.951, 2.490, 0.000],
-        arm_dof=7
-    )
-    panda_ctx.warmup()
-    ROBOT_REGISTRY["franka_panda"] = panda_ctx
-except Exception as e:
-    print(f"Error loading franka_panda: {e}")
+class SceneSyncRequest(BaseModel):
+    """Syncs backend with all manipulators actively loaded in the frontend scene (supports 1 or N robots)."""
+    robot_ids: List[str] = Field(..., description="List of robot IDs loaded in the current scene")
 
-# 2. Universal Robots UR5e (6 revolute arm joints) with Robotiq 2F-85 gripper
-try:
-    ur5e_ctx = RobotModelContext(
-        robot_id="ur5e",
-        description_name="ur5e_description",
-        target_link_candidates=["tool0", "wrist_3_link", "flange"],
-        q_home=[1.5, -2.2708, 2.2708, -1.5708, -1.5708, 0.0],
-        arm_dof=6,
-        tcp_offset=0.165  # a little more than the Robotiq 2F-85 gripper length to account for the TCP being at the tip of the fingers
-    )
-    ur5e_ctx.warmup()
-    ROBOT_REGISTRY["ur5e"] = ur5e_ctx
-except Exception as e:
-    print(f"Error loading ur5e: {e}")
+class SceneSyncResponse(BaseModel):
+    status: str
+    active_robots: List[str]
+    loaded_robots: List[str]
+    warmup_times_ms: Dict[str, float]
+
+class WarmupRequest(BaseModel):
+    robot_id: str
 
 class IKRequest(BaseModel):
     robot_id: Optional[str] = "franka_panda"
@@ -180,20 +217,57 @@ class IKResponse(BaseModel):
     method: str = "pyroki"
     error: Optional[str] = None
 
+# --- API Endpoints ---
+
 @app.get("/api/health")
 def health():
     return {
         "status": "ok",
         "solver": "pyroki",
-        "available_robots": list(ROBOT_REGISTRY.keys()),
+        "configured_robots": list(ROBOT_CONFIGS.keys()),
+        "loaded_robots": list(LOADED_ROBOTS.keys()),
         "robot_details": {
             rid: {
                 "dof": ctx.arm_dof,
                 "target_link": ctx.target_link_name,
-                "actuated_joints": ctx.robot.joints.num_actuated_joints
+                "actuated_joints": ctx.robot.joints.num_actuated_joints,
+                "tcp_offset": ctx.tcp_offset
             }
-            for rid, ctx in ROBOT_REGISTRY.items()
+            for rid, ctx in LOADED_ROBOTS.items()
         }
+    }
+
+@app.post("/api/scene/sync", response_model=SceneSyncResponse)
+def sync_scene(req: SceneSyncRequest):
+    """
+    Syncs the PyRoKi solver with whichever manipulator(s) are present in the frontend scene.
+    Dynamically loads and JIT-warms up any required arms that are not already cached.
+    Supports single or multi-manipulator setups seamlessly.
+    """
+    warmup_times: Dict[str, float] = {}
+    for rid in req.robot_ids:
+        if rid in ROBOT_CONFIGS and rid not in LOADED_ROBOTS:
+            t0 = time.time()
+            get_or_load_robot(rid)
+            warmup_times[rid] = round((time.time() - t0) * 1000.0, 1)
+
+    return SceneSyncResponse(
+        status="ready",
+        active_robots=req.robot_ids,
+        loaded_robots=list(LOADED_ROBOTS.keys()),
+        warmup_times_ms=warmup_times
+    )
+
+@app.post("/api/robots/warmup")
+def warmup_robot(req: WarmupRequest):
+    """Pre-warms up a specific manipulator on demand."""
+    t0 = time.time()
+    get_or_load_robot(req.robot_id)
+    elapsed_ms = (time.time() - t0) * 1000.0
+    return {
+        "status": "ready",
+        "robot_id": req.robot_id,
+        "warmup_time_ms": round(elapsed_ms, 1)
     }
 
 @app.post("/api/ik/solve", response_model=IKResponse)
@@ -201,12 +275,19 @@ def solve_ik(req: IKRequest):
     t_start = time.time()
     robot_id = req.robot_id or "franka_panda"
     
-    if robot_id not in ROBOT_REGISTRY:
-        # Fallback to first available or error
-        if "franka_panda" in ROBOT_REGISTRY:
-            robot_id = "franka_panda"
-        elif len(ROBOT_REGISTRY) > 0:
-            robot_id = list(ROBOT_REGISTRY.keys())[0]
+    # On-demand get or load the requested robot context
+    try:
+        ctx = get_or_load_robot(robot_id)
+    except HTTPException:
+        # Fallback to first loaded robot or first configured robot
+        if len(LOADED_ROBOTS) > 0:
+            fallback_id = list(LOADED_ROBOTS.keys())[0]
+            ctx = LOADED_ROBOTS[fallback_id]
+            robot_id = fallback_id
+        elif len(ROBOT_CONFIGS) > 0:
+            fallback_id = list(ROBOT_CONFIGS.keys())[0]
+            ctx = get_or_load_robot(fallback_id)
+            robot_id = fallback_id
         else:
             return IKResponse(
                 success=False,
@@ -214,8 +295,6 @@ def solve_ik(req: IKRequest):
                 computation_time_ms=0.0,
                 error=f"Robot model '{robot_id}' is not loaded."
             )
-
-    ctx = ROBOT_REGISTRY[robot_id]
 
     try:
         # Convert position
@@ -340,5 +419,5 @@ def solve_ik(req: IKRequest):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PYROKI_PORT", 5050))
-    print(f"Starting PyRoKi Generalized FastAPI server on 127.0.0.1:{port}...")
+    print(f"Starting PyRoKi On-Demand Scene-Coupled FastAPI server on 127.0.0.1:{port}...")
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
