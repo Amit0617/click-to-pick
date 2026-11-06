@@ -71,7 +71,7 @@ export function RobotSelector({
                     ? 'PyRoKi Active'
                     : 'PyRoKi Ready'
                   : 'Connecting...'
-                : 'Analytical IK'}
+                : ikSolver === 'dls' ? 'Local DLS IK' : 'Analytical IK'}
             </span>
           </div>
         </div>
@@ -81,12 +81,12 @@ export function RobotSelector({
           <div className="flex items-center justify-between text-[10px] font-semibold tracking-wider text-slate-400 uppercase">
             <span>IK Solver</span>
             <span className="text-[9px] font-normal lowercase text-slate-400">
-              {ikSolver === 'pyroki' ? 'JAX optimizer' : 'closed-form geometric'}
+              {ikSolver === 'pyroki' ? 'JAX optimizer' : ikSolver === 'dls' ? 'MuJoCo + DLS' : 'closed-form geometric'}
             </span>
           </div>
 
           {supportsAnalytical ? (
-            <div className={`grid ${supportsAnalytical ? 'grid-cols-3' : 'grid-cols-2'} p-1 bg-slate-200/50 dark:bg-slate-800/80 rounded-xl border border-black/5 dark:border-white/5">
+            <div className={`grid ${supportsAnalytical ? 'grid-cols-3' : 'grid-cols-2'} p-1 bg-slate-200/50 dark:bg-slate-800/80 rounded-xl border border-black/5 dark:border-white/5`}>
               <button
                 id="ik-solver-analytical-btn"
                 type="button"
