@@ -54,6 +54,7 @@ export class IkSystem {
     private qNeutral = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]; // Preferred "home" pose
     private dlsKinematics: MuJoCoKinematics | null = null;
     private dlsSolver: DampedLeastSquaresIK | null = null;
+    private lastDlsSolveAt = 0;
     
     // Joint 7 parameters for redundancy resolution in Franka analytical solver
     private readonly q7Min = -2.8973;
@@ -77,6 +78,9 @@ export class IkSystem {
     }
 
     setRobot(robotId: string) {
+        this.dlsKinematics?.dispose();
+        this.dlsKinematics = null;
+        this.dlsSolver = null;
         this.currentRobotId = robotId;
         this.lastRequestedTarget = null;
         this.currentSpec = ROBOT_CONFIGS[robotId] || ROBOT_CONFIGS.franka_panda;
@@ -115,7 +119,7 @@ export class IkSystem {
             this.dlsSolver = new DampedLeastSquaresIK(this.dlsKinematics, {
                 lowerLimits: this.dlsKinematics.lowerLimits,
                 upperLimits: this.dlsKinematics.upperLimits,
-                maxIterations: 60,
+                maxIterations: 35,
                 positionTolerance: 0.001,
                 rotationTolerance: 0.01,
             });
@@ -377,7 +381,8 @@ export class IkSystem {
             const targetChanged = !this.lastRequestedTarget
                 || this.target.position.distanceToSquared(this.lastRequestedTarget.position) > 1e-6
                 || this.target.quaternion.angleTo(this.lastRequestedTarget.quaternion) > 0.01;
-            if (targetChanged && this.dlsKinematics) {
+            if (targetChanged && this.dlsKinematics && performance.now() - this.lastDlsSolveAt >= 80) {
+                this.lastDlsSolveAt = performance.now();
                 this.lastRequestedTarget = {
                     position: this.target.position.clone(),
                     quaternion: this.target.quaternion.clone(),
