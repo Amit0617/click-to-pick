@@ -60,7 +60,7 @@ export class IkSystem {
     private readonly q7Max = 2.8973;
     private readonly q7Step = 0.1; 
 
-    constructor(mujoco: MujocoModule, camera: THREE.Camera, domElement: HTMLElement, orbitControls: OrbitControls) {
+    constructor(private readonly mujoco: MujocoModule, camera: THREE.Camera, domElement: HTMLElement, orbitControls: OrbitControls) {
         this.target = new THREE.Group();
         this.target.name = "IK Target";
         
