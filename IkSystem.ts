@@ -90,6 +90,7 @@ export class IkSystem {
     setSolverType(type: IkSolverType) {
         if (this.currentSpec.availableSolvers.includes(type)) {
             this.solverType = type;
+            this.lastRequestedTarget = null;
         }
     }
     
