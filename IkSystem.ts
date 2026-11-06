@@ -81,10 +81,19 @@ export class IkSystem {
         this.currentSpec = ROBOT_CONFIGS[robotId] || ROBOT_CONFIGS.franka_panda;
         this.dof = this.currentSpec.dof;
         this.qNeutral = [...this.currentSpec.homeJoints];
+        this.lastRequestedTarget = null;
 
         if (!this.currentSpec.availableSolvers.includes(this.solverType)) {
             this.solverType = this.currentSpec.defaultSolver;
         }
+    }
+
+    private applyJointSolution(solution: number[], data: MujocoData): void {
+        if (this.dlsKinematics) {
+            this.dlsKinematics.applyControls(solution, data);
+            return;
+        }
+        for (let i = 0; i < Math.min(solution.length, this.dof); i++) data.ctrl[i] = solution[i];
     }
 
     setSolverType(type: IkSolverType) {
@@ -347,11 +356,7 @@ export class IkSystem {
                 };
                 this.solvePyroki(this.target.position, this.target.quaternion, currentQ)
                     .then((solution) => {
-                        if (solution) {
-                            for (let i = 0; i < Math.min(solution.length, this.dof); i++) {
-                                mjData.ctrl[i] = solution[i];
-                            }
-                        }
+                        if (solution) this.applyJointSolution(solution, mjData);
                     })
                     .finally(() => {
                         this.isAsyncSolving = false;
@@ -371,11 +376,7 @@ export class IkSystem {
             }
         } else {
             const solution = this.solveAnalytical(this.target.position, this.target.quaternion, currentQ);
-            if (solution) {
-                for (let i = 0; i < Math.min(solution.length, this.dof); i++) {
-                    mjData.ctrl[i] = solution[i];
-                }
-            }
+            if (solution) this.applyJointSolution(solution, mjData);
         }
     }
     
