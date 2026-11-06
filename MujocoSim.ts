@@ -120,7 +120,7 @@ export class MujocoSim {
 
             this.mujoco.mj_forward(this.mjModel, this.mjData!);
             this.renderSys.initScene(this.mjModel);
-            this.ikSys.init(this.mjModel, isDouble);
+            this.ikSys.init(this.mjModel, isDouble, this.mjData!);
             this.ikSys.syncToSite(this.mjData!);
             
             this.sequenceAnimator.reset();
@@ -354,11 +354,11 @@ export class MujocoSim {
         this.speedMultiplier = speed;
     }
 
-    setIkSolver(solver: 'analytical' | 'pyroki') {
+    setIkSolver(solver: 'analytical' | 'pyroki' | 'dls') {
         this.ikSys.setSolverType(solver);
     }
 
-    getIkSolver(): 'analytical' | 'pyroki' {
+    getIkSolver(): 'analytical' | 'pyroki' | 'dls' {
         return this.ikSys.solverType;
     }
     
