@@ -78,6 +78,7 @@ export class IkSystem {
 
     setRobot(robotId: string) {
         this.currentRobotId = robotId;
+        this.lastRequestedTarget = null;
         this.currentSpec = ROBOT_CONFIGS[robotId] || ROBOT_CONFIGS.franka_panda;
         this.dof = this.currentSpec.dof;
         this.qNeutral = [...this.currentSpec.homeJoints];
@@ -354,9 +355,19 @@ export class IkSystem {
                     position: this.target.position.clone(),
                     quaternion: this.target.quaternion.clone()
                 };
-                this.solvePyroki(this.target.position, this.target.quaternion, currentQ)
+                const requestedTarget = {
+                    position: this.target.position.clone(),
+                    quaternion: this.target.quaternion.clone(),
+                };
+                const requestedRobotId = this.currentRobotId;
+                this.solvePyroki(requestedTarget.position, requestedTarget.quaternion, currentQ)
                     .then((solution) => {
-                        if (solution) this.applyJointSolution(solution, mjData);
+                        const stillCurrent = this.calculating
+                            && this.solverType === 'pyroki'
+                            && this.currentRobotId === requestedRobotId
+                            && this.target.position.distanceToSquared(requestedTarget.position) < 1e-6
+                            && this.target.quaternion.angleTo(requestedTarget.quaternion) < 0.01;
+                        if (solution && stillCurrent) this.applyJointSolution(solution, mjData);
                     })
                     .finally(() => {
                         this.isAsyncSolving = false;
@@ -381,7 +392,10 @@ export class IkSystem {
     }
     
     setCalculating(enabled: boolean) {
-        this.calculating = enabled;
+        if (this.calculating !== enabled) {
+            this.calculating = enabled;
+            if (enabled) this.lastRequestedTarget = null;
+        }
     }
     
     setGizmoVisible(visible: boolean) {
