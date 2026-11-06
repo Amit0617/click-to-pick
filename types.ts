@@ -49,7 +49,7 @@ export interface MujocoModel {
   name_actuatoradr: Int32Array;
   name_bodyadr: Int32Array;
   names: Int8Array;
-  jnt_qposadr: Int32Array;
+  jnt_qposadr: Int32Array;\n  jnt_dofadr: Int32Array;\n  jnt_type: Int32Array;\n  jnt_limited: Int32Array;\n  jnt_range: Float64Array;\n  name_jntadr: Int32Array;
   actuator_trnid: Int32Array;
   geom_group: Int32Array;
   geom_type: Int32Array;
