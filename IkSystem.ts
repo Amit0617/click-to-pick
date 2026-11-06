@@ -314,18 +314,8 @@ export class IkSystem {
      * Unified asynchronous solve method respecting the currently selected solverType.
      */
     async solveAsync(pos: THREE.Vector3, quat: THREE.Quaternion, currentQ: number[]): Promise<number[] | null> {
-        if (this.solverType === 'dls') {
-            const targetChanged = !this.lastRequestedTarget
-                || this.target.position.distanceToSquared(this.lastRequestedTarget.position) > 1e-6
-                || this.target.quaternion.angleTo(this.lastRequestedTarget.quaternion) > 0.01;
-            if (targetChanged && this.dlsKinematics) {
-                this.lastRequestedTarget = { position: this.target.position.clone(), quaternion: this.target.quaternion.clone() };
-                const solution = this.solveDls(this.target.position, this.target.quaternion, currentQ);
-                if (solution) this.dlsKinematics.applyControls(solution, mjData);
-            }
-        } else if (this.solverType === 'pyroki') {
-            return await this.solvePyroki(pos, quat, currentQ);
-        }
+        if (this.solverType === 'pyroki') return await this.solvePyroki(pos, quat, currentQ);
+        if (this.solverType === 'dls') return this.solveDls(pos, quat, currentQ);
         return this.solveAnalytical(pos, quat, currentQ);
     }
 
@@ -367,8 +357,19 @@ export class IkSystem {
                         this.isAsyncSolving = false;
                     });
             }
+        } else if (this.solverType === 'dls') {
+            const targetChanged = !this.lastRequestedTarget
+                || this.target.position.distanceToSquared(this.lastRequestedTarget.position) > 1e-6
+                || this.target.quaternion.angleTo(this.lastRequestedTarget.quaternion) > 0.01;
+            if (targetChanged && this.dlsKinematics) {
+                this.lastRequestedTarget = {
+                    position: this.target.position.clone(),
+                    quaternion: this.target.quaternion.clone(),
+                };
+                const solution = this.solveDls(this.target.position, this.target.quaternion, currentQ);
+                if (solution) this.dlsKinematics.applyControls(solution, mjData);
+            }
         } else {
-            // Solve analytical
             const solution = this.solveAnalytical(this.target.position, this.target.quaternion, currentQ);
             if (solution) {
                 for (let i = 0; i < Math.min(solution.length, this.dof); i++) {
