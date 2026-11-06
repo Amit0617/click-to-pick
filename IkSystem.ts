@@ -9,6 +9,9 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { calculateAnalyticalIK } from './FrankaAnalyticalIK';
 import { ROBOT_CONFIGS, RobotSpec } from './robots';
 import { MujocoData, MujocoModel, MujocoModule } from './types';
+import { DampedLeastSquaresIK } from './DampedLeastSquaresIK';
+import { MuJoCoKinematics, resolveMuJoCoJoints } from './MuJoCoKinematics';
+import { getName } from './utils/StringUtils';
 
 function squaredDistance(arr1: number[], arr2: number[]) {
     let sum = 0;
@@ -18,10 +21,10 @@ function squaredDistance(arr1: number[], arr2: number[]) {
     return sum;
 }
 
-export type IkSolverType = 'analytical' | 'pyroki';
+export type IkSolverType = 'analytical' | 'pyroki' | 'dls';
 
 export interface IkSolveStats {
-    method: 'analytical' | 'pyroki';
+    method: 'analytical' | 'pyroki' | 'dls';
     timeMs: number;
     robotId?: string;
 }
@@ -49,6 +52,8 @@ export class IkSystem {
     private isAsyncSolving = false;
     private lastRequestedTarget: { position: THREE.Vector3; quaternion: THREE.Quaternion } | null = null;
     private qNeutral = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]; // Preferred "home" pose
+    private dlsKinematics: MuJoCoKinematics | null = null;
+    private dlsSolver: DampedLeastSquaresIK | null = null;
     
     // Joint 7 parameters for redundancy resolution in Franka analytical solver
     private readonly q7Min = -2.8973;
@@ -88,8 +93,25 @@ export class IkSystem {
         }
     }
     
-    init(mjModel: MujocoModel, isDouble: boolean) {
-        // Reset internal state if needed
+    init(mjModel: MujocoModel, isDouble: boolean, mjData?: MujocoData) {
+        this.dlsKinematics?.dispose();
+        this.dlsKinematics = null;
+        this.dlsSolver = null;
+        if (!mjData || this.gripperSiteId < 0) return;
+        try {
+            const joints = resolveMuJoCoJoints(mjModel, (address) => getName(mjModel, address), this.currentSpec.jointNames);
+            this.dlsKinematics = new MuJoCoKinematics(this.mujoco, mjModel, mjData, this.gripperSiteId, joints);
+            this.dlsSolver = new DampedLeastSquaresIK(this.dlsKinematics, {
+                lowerLimits: this.dlsKinematics.lowerLimits,
+                upperLimits: this.dlsKinematics.upperLimits,
+                maxIterations: 60,
+                positionTolerance: 0.001,
+                rotationTolerance: 0.01,
+            });
+            console.info('[DLS IK] Initialized', this.currentRobotId, joints);
+        } catch (error) {
+            console.error('[DLS IK] Failed to initialize MuJoCo joint mapping:', error);
+        }
     }
     
     syncToSite(mjData: MujocoData) {
@@ -207,6 +229,23 @@ export class IkSystem {
         return bestSolution;
     }
 
+    /** Solves pose IK locally using MuJoCo forward kinematics. */
+    solveDls(pos: THREE.Vector3, quat: THREE.Quaternion, currentQ: number[]): number[] | null {
+        if (!this.dlsSolver || !this.dlsKinematics) return null;
+        const start = performance.now();
+        const result = this.dlsSolver.solve(
+            { position: pos.clone(), quaternion: quat.clone().normalize() },
+            currentQ,
+        );
+        this.lastSolveStats = { method: 'dls', timeMs: performance.now() - start, robotId: this.currentRobotId };
+        this.onSolveCallback?.(this.lastSolveStats);
+        if (!result.converged) {
+            console.debug('[DLS IK] Target not reached', { iterations: result.iterations, positionError: result.positionError, rotationError: result.rotationError });
+            return null;
+        }
+        return result.joints;
+    }
+
     /**
      * Solves IK using PyRoKi FastAPI backend with generalized robot morphology support.
      */
@@ -274,7 +313,16 @@ export class IkSystem {
      * Unified asynchronous solve method respecting the currently selected solverType.
      */
     async solveAsync(pos: THREE.Vector3, quat: THREE.Quaternion, currentQ: number[]): Promise<number[] | null> {
-        if (this.solverType === 'pyroki') {
+        if (this.solverType === 'dls') {
+            const targetChanged = !this.lastRequestedTarget
+                || this.target.position.distanceToSquared(this.lastRequestedTarget.position) > 1e-6
+                || this.target.quaternion.angleTo(this.lastRequestedTarget.quaternion) > 0.01;
+            if (targetChanged && this.dlsKinematics) {
+                this.lastRequestedTarget = { position: this.target.position.clone(), quaternion: this.target.quaternion.clone() };
+                const solution = this.solveDls(this.target.position, this.target.quaternion, currentQ);
+                if (solution) this.dlsKinematics.applyControls(solution, mjData);
+            }
+        } else if (this.solverType === 'pyroki') {
             return await this.solvePyroki(pos, quat, currentQ);
         }
         return this.solveAnalytical(pos, quat, currentQ);
@@ -291,9 +339,9 @@ export class IkSystem {
     update(mjModel: MujocoModel, mjData: MujocoData) {
         if (!this.calculating) return;
         
-        // Prepare current state for arm joints
-        const currentQ: number[] = [];
-        for (let i = 0; i < this.dof; i++) currentQ.push(mjData.qpos[i]);
+        // Read named arm joints through their MuJoCo qpos addresses.
+        const currentQ = this.dlsKinematics?.captureReference()
+            ?? Array.from({ length: this.dof }, (_, i) => mjData.qpos[i]);
 
         if (this.solverType === 'pyroki') {
             const targetChanged = !this.lastRequestedTarget
@@ -351,6 +399,9 @@ export class IkSystem {
     }
     
     dispose() {
+        this.dlsKinematics?.dispose();
+        this.dlsKinematics = null;
+        this.dlsSolver = null;
         this.control.dispose();
     }
 }
