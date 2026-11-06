@@ -10,7 +10,7 @@ export interface RobotSpec {
   name: string;
   shortName: string;
   manufacturer: string;
-  dof: number;
+  dof: number;\n  /** Ordered scalar arm joints in the MuJoCo model. */\n  jointNames: string[];
   menageriePath: string; // Directory in google-deepmind/mujoco_menagerie
   gripperMenageriePath?: string; // Optional gripper repository path
   gripperXmlFile?: string; // e.g. '2f85.xml'
@@ -41,7 +41,7 @@ export const ROBOT_CONFIGS: Record<string, RobotSpec> = {
     name: 'Franka Emika Panda',
     shortName: 'Franka Panda',
     manufacturer: 'Franka Robotics',
-    dof: 7,
+    dof: 7,\n    jointNames: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'joint7'],
     menageriePath: 'franka_emika_panda',
     sceneFile: 'scene.xml',
     pyrokiRobotId: 'franka_panda',
@@ -67,7 +67,7 @@ export const ROBOT_CONFIGS: Record<string, RobotSpec> = {
     name: 'Universal Robots UR5e',
     shortName: 'UR5e + Robotiq 2F-85',
     manufacturer: 'Universal Robots',
-    dof: 6,
+    dof: 6,\n    jointNames: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'],
     menageriePath: 'universal_robots_ur5e',
     gripperMenageriePath: 'robotiq_2f85',
     gripperXmlFile: '2f85.xml',
