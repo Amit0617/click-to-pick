@@ -121,3 +121,23 @@ uv run python pyroki_server.py
 
 4. Run the app (in another terminal tab):
    `npm run dev`/ `pnpm run dev` at the root of project.
+
+## Local MuJoCo DLS IK (experimental)
+
+The `dls` solver runs in the browser and uses the loaded MuJoCo model as its
+kinematic source of truth. It resolves the configured arm joints by name,
+reads their `qpos`/actuator addresses from the compiled model, and evaluates
+the TCP pose on a separate scratch `MjData`. The live simulation state is not
+modified during optimization; only the resulting actuator controls are
+written after a converged solution is found.
+
+The first implementation uses a central finite-difference geometric Jacobian
+and an adaptive damped-least-squares update. This is intentionally a portable
+baseline while the `mj_jacSite` WASM export is verified. It is suitable for
+interactive prototyping, but finite differences require multiple forward
+passes per iteration and may be slower than a native MuJoCo Jacobian.
+
+Select **DLS** in the IK solver panel to compare it with PyRoKi. PyRoKi remains
+the default/reference solver. The local solver currently handles scalar hinge
+and slide arm joints, joint limits, and 6D end-effector pose error. It does not
+perform collision avoidance or trajectory planning.

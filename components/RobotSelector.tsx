@@ -34,6 +34,7 @@ export function RobotSelector({
 }: RobotSelectorProps) {
   const robot: RobotSpec = ROBOT_CONFIGS[currentRobotId] || ROBOT_CONFIGS.franka_panda;
   const supportsAnalytical = robot.availableSolvers.includes('analytical');
+  const supportsDls = robot.availableSolvers.includes('dls');
 
   const panelStyle = isDarkMode
     ? 'bg-slate-900/80 border-white/10 text-slate-100 shadow-slate-900/20'
@@ -70,7 +71,7 @@ export function RobotSelector({
                     ? 'PyRoKi Active'
                     : 'PyRoKi Ready'
                   : 'Connecting...'
-                : 'Analytical IK'}
+                : ikSolver === 'dls' ? 'Local DLS IK' : 'Analytical IK'}
             </span>
           </div>
         </div>
@@ -80,12 +81,12 @@ export function RobotSelector({
           <div className="flex items-center justify-between text-[10px] font-semibold tracking-wider text-slate-400 uppercase">
             <span>IK Solver</span>
             <span className="text-[9px] font-normal lowercase text-slate-400">
-              {ikSolver === 'pyroki' ? 'JAX optimizer' : 'closed-form geometric'}
+              {ikSolver === 'pyroki' ? 'JAX optimizer' : ikSolver === 'dls' ? 'MuJoCo + DLS' : 'closed-form geometric'}
             </span>
           </div>
 
           {supportsAnalytical ? (
-            <div className="grid grid-cols-2 p-1 bg-slate-200/50 dark:bg-slate-800/80 rounded-xl border border-black/5 dark:border-white/5">
+            <div className={`grid ${supportsAnalytical ? 'grid-cols-3' : 'grid-cols-2'} p-1 bg-slate-200/50 dark:bg-slate-800/80 rounded-xl border border-black/5 dark:border-white/5`}>
               <button
                 id="ik-solver-analytical-btn"
                 type="button"
@@ -115,6 +116,22 @@ export function RobotSelector({
                 <Sparkles className="w-3.5 h-3.5 opacity-80 text-amber-500 dark:text-amber-400" />
                 <span>PyRoKi</span>
               </button>
+              {supportsDls && (
+                <button
+                  id="ik-solver-dls-btn"
+                  type="button"
+                  onClick={() => setIkSolver('dls')}
+                  className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-medium transition-all ${
+                    ikSolver === 'dls'
+                      ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm font-semibold'
+                      : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+                  }`}
+                  title="Local damped least-squares IK using MuJoCo forward kinematics"
+                >
+                  <Cpu className="w-3.5 h-3.5 opacity-80 text-emerald-500" />
+                  <span>DLS</span>
+                </button>
+              )}
             </div>
           ) : (
             <div className="p-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-700 dark:text-indigo-300 flex items-center gap-2">
@@ -123,6 +140,21 @@ export function RobotSelector({
                 <span className="font-bold">PyRoKi JAX Active</span>
                 <p className="text-[9px] text-slate-500 dark:text-slate-400">Generalized 6-DOF least-squares optimizer</p>
               </div>
+            </div>
+          )}
+
+          {!supportsAnalytical && supportsDls && (
+            <div className="grid grid-cols-2 p-1 bg-slate-200/50 dark:bg-slate-800/80 rounded-xl border border-black/5 dark:border-white/5">
+              <button
+                type="button"
+                onClick={() => setIkSolver('pyroki')}
+                className={`py-1.5 px-2 rounded-lg text-xs font-medium ${ikSolver === 'pyroki' ? 'bg-white dark:bg-slate-700 shadow-sm' : 'text-slate-500'}`}
+              >PyRoKi</button>
+              <button
+                type="button"
+                onClick={() => setIkSolver('dls')}
+                className={`py-1.5 px-2 rounded-lg text-xs font-medium ${ikSolver === 'dls' ? 'bg-white dark:bg-slate-700 shadow-sm' : 'text-slate-500'}`}
+              >Local DLS</button>
             </div>
           )}
 
