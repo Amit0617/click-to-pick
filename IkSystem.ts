@@ -297,6 +297,7 @@ export class IkSystem {
         }];
 
         let best = primary.converged ? primary : null;
+        let selectedSeed = best ? 'current' : '';
         let bestScore = best
             ? best.cost + 0.02 * squaredDistance(best.joints, currentQ)
             : Infinity;
@@ -316,11 +317,12 @@ export class IkSystem {
                 const score = result.cost + 0.02 * squaredDistance(result.joints, currentQ);
                 if (score < bestScore) {
                     best = result;
+                    selectedSeed = seed.label;
                     bestScore = score;
                 }
                 // A successful nearby candidate is usually preferable to
                 // spending more frame time exploring distant configurations.
-                if (squaredDistance(result.joints, currentQ) < 0.04) break;
+                if (score < 1e-8 && squaredDistance(result.joints, currentQ) < 0.04) break;
             }
         }
 
@@ -338,7 +340,7 @@ export class IkSystem {
         this.lastSuccessfulDlsJoints = [...best.joints];
         if (attempts.length > 1) {
             console.info('[DLS IK] Recovered with alternate seed', {
-                selected: attempts.find(a => a.converged && Math.abs(a.positionError - best!.positionError) < 1e-12)?.seed,
+                selected: selectedSeed,
                 attempts,
             });
         }
