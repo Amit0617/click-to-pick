@@ -55,6 +55,7 @@ export class IkSystem {
     private dlsKinematics: MuJoCoKinematics | null = null;
     private dlsSolver: DampedLeastSquaresIK | null = null;
     private lastDlsSolveAt = 0;
+    private lastSuccessfulDlsJoints: number[] | null = null;
     
     // Joint 7 parameters for redundancy resolution in Franka analytical solver
     private readonly q7Min = -2.8973;
@@ -81,6 +82,7 @@ export class IkSystem {
         this.dlsKinematics?.dispose();
         this.dlsKinematics = null;
         this.dlsSolver = null;
+        this.lastSuccessfulDlsJoints = null;
         this.currentRobotId = robotId;
         this.lastRequestedTarget = null;
         this.currentSpec = ROBOT_CONFIGS[robotId] || ROBOT_CONFIGS.franka_panda;
@@ -112,6 +114,7 @@ export class IkSystem {
         this.dlsKinematics?.dispose();
         this.dlsKinematics = null;
         this.dlsSolver = null;
+        this.lastSuccessfulDlsJoints = null;
         if (!mjData || this.gripperSiteId < 0) return;
         try {
             const joints = resolveMuJoCoJoints(mjModel, (address) => getName(mjModel, address), this.currentSpec.jointNames);
@@ -244,21 +247,102 @@ export class IkSystem {
         return bestSolution;
     }
 
-    /** Solves pose IK locally using MuJoCo forward kinematics. */
+    /**
+     * Build deterministic alternate configurations for escaping a poor local
+     * basin. Perturb the shoulder and elbow first; wrist perturbations tend to
+     * change TCP orientation without materially improving reachability.
+     */
+    private createDlsFallbackSeeds(currentQ: number[]): Array<{ label: string; joints: number[] }> {
+        const seeds: Array<{ label: string; joints: number[] }> = [];
+        const seen: number[][] = [];
+        const add = (label: string, joints: number[]) => {
+            if (joints.length !== currentQ.length || seen.some(q => squaredDistance(q, joints) < 1e-8)) return;
+            seen.push([...joints]);
+            seeds.push({ label, joints: [...joints] });
+        };
+
+        if (this.lastSuccessfulDlsJoints) add('last-successful', this.lastSuccessfulDlsJoints);
+        add('home', this.currentSpec.homeJoints.slice(0, this.dof));
+
+        const elbowIndex = this.currentRobotId === 'franka_panda' ? 3 : 2;
+        const perturb = (label: string, changes: Array<[number, number]>) => {
+            const seed = [...currentQ];
+            for (const [index, delta] of changes) {
+                if (index < seed.length) seed[index] += delta;
+            }
+            add(label, seed);
+        };
+
+        perturb('shoulder-positive', [[0, 0.9]]);
+        perturb('shoulder-negative', [[0, -0.9]]);
+        perturb('elbow-positive', [[elbowIndex, 0.7]]);
+        perturb('elbow-negative', [[elbowIndex, -0.7]]);
+        perturb('shoulder-elbow-positive', [[0, 0.7], [elbowIndex, 0.55]]);
+        perturb('shoulder-elbow-negative', [[0, -0.7], [elbowIndex, -0.55]]);
+        return seeds;
+    }
+
+    /** Solves locally first, then retries from deterministic alternate seeds. */
     solveDls(pos: THREE.Vector3, quat: THREE.Quaternion, currentQ: number[]): number[] | null {
         if (!this.dlsSolver || !this.dlsKinematics) return null;
         const start = performance.now();
-        const result = this.dlsSolver.solve(
-            { position: pos.clone(), quaternion: quat.clone().normalize() },
-            currentQ,
-        );
+        const target = { position: pos.clone(), quaternion: quat.clone().normalize() };
+        const primary = this.dlsSolver.solve(target, currentQ);
+        const attempts = [{
+            seed: 'current',
+            converged: primary.converged,
+            iterations: primary.iterations,
+            positionError: primary.positionError,
+            rotationError: primary.rotationError,
+        }];
+
+        let best = primary.converged ? primary : null;
+        let bestScore = best
+            ? best.cost + 0.02 * squaredDistance(best.joints, currentQ)
+            : Infinity;
+
+        if (!best) {
+            for (const seed of this.createDlsFallbackSeeds(currentQ)) {
+                const result = this.dlsSolver.solve(target, seed.joints);
+                attempts.push({
+                    seed: seed.label,
+                    converged: result.converged,
+                    iterations: result.iterations,
+                    positionError: result.positionError,
+                    rotationError: result.rotationError,
+                });
+
+                if (!result.converged) continue;
+                const score = result.cost + 0.02 * squaredDistance(result.joints, currentQ);
+                if (score < bestScore) {
+                    best = result;
+                    bestScore = score;
+                }
+                // A successful nearby candidate is usually preferable to
+                // spending more frame time exploring distant configurations.
+                if (squaredDistance(result.joints, currentQ) < 0.04) break;
+            }
+        }
+
         this.lastSolveStats = { method: 'dls', timeMs: performance.now() - start, robotId: this.currentRobotId };
         this.onSolveCallback?.(this.lastSolveStats);
-        if (!result.converged) {
-            console.debug('[DLS IK] Target not reached', { iterations: result.iterations, positionError: result.positionError, rotationError: result.rotationError });
+
+        if (!best) {
+            console.debug('[DLS IK] All seed attempts failed', {
+                target: [pos.x, pos.y, pos.z],
+                attempts,
+            });
             return null;
         }
-        return result.joints;
+
+        this.lastSuccessfulDlsJoints = [...best.joints];
+        if (attempts.length > 1) {
+            console.info('[DLS IK] Recovered with alternate seed', {
+                selected: attempts.find(a => a.converged && Math.abs(a.positionError - best!.positionError) < 1e-12)?.seed,
+                attempts,
+            });
+        }
+        return best.joints;
     }
 
     /**
